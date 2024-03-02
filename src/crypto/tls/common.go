@@ -10,11 +10,21 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
-	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
+)
+
+const (
+	VersionTLS10 = 0x0301
+	VersionTLS11 = 0x0302
+	VersionTLS12 = 0x0303
+	VersionTLS13 = 0x0304
+
+	// Deprecated: SSLv3 is cryptographically broken, and is no longer
+	// supported by this package. See golang.org/issue/32716.
+	VersionSSL30 = 0x0300
 )
 
 // CurveID is the type of a TLS identifier for an elliptic curve. See
@@ -23,13 +33,6 @@ import (
 // In TLS 1.3, this type is called NamedGroup, but at this time this library
 // only supports Elliptic Curve based groups. See RFC 8446, Section 4.2.7.
 type CurveID uint16
-
-// CipherSuiteName returns the standard name for the passed cipher suite ID
-//
-// Not Implemented.
-func CipherSuiteName(id uint16) string {
-	return fmt.Sprintf("0x%04X", id)
-}
 
 // ConnectionState records basic TLS details about the connection.
 type ConnectionState struct {
@@ -426,6 +429,10 @@ type Config struct {
 	// autoSessionTicketKeys is like sessionTicketKeys but is owned by the
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
+}
+
+func (c *Config) Clone() *Config {
+	panic("unimplemented: tls.Config.Clone")
 }
 
 // ticketKey is the internal representation of a session ticket key.
