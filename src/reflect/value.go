@@ -1111,6 +1111,14 @@ func (v Value) Set(x Value) {
 	memcpy(v.value, xptr, size)
 }
 
+func (v Value) SetIterKey(iter *MapIter) {
+	v.Set(iter.Key())
+}
+
+func (v Value) SetIterValue(iter *MapIter) {
+	v.Set(iter.Value())
+}
+
 func (v Value) SetZero() {
 	v.checkAddressable()
 	v.checkRO()
