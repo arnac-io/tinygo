@@ -44,6 +44,7 @@ type Config struct {
 	ABI             string
 	GOOS            string
 	GOARCH          string
+	BuildMode       string
 	CodeModel       string
 	RelocationModel string
 	SizeLevel       int
@@ -242,7 +243,7 @@ func NewTargetMachine(config *Config) (llvm.TargetMachine, error) {
 }
 
 // Sizes returns a types.Sizes appropriate for the given target machine. It
-// includes the correct int size and aligment as is necessary for the Go
+// includes the correct int size and alignment as is necessary for the Go
 // typechecker.
 func Sizes(machine llvm.TargetMachine) types.Sizes {
 	targetData := machine.CreateTargetData()
@@ -1384,6 +1385,11 @@ func (b *builder) createFunction() {
 		b.llvmFn.SetLinkage(llvm.InternalLinkage)
 		b.createFunction()
 	}
+
+	// Create wrapper function that can be called externally.
+	if b.info.wasmExport != "" {
+		b.createWasmExport()
+	}
 }
 
 // posser is an interface that's implemented by both ssa.Value and
@@ -1674,6 +1680,10 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			result = b.CreateSelect(cmp, result, arg, "")
 		}
 		return result, nil
+	case "panic":
+		// This is rare, but happens in "defer panic()".
+		b.createRuntimeInvoke("_panic", argValues, "")
+		return llvm.Value{}, nil
 	case "print", "println":
 		for i, value := range argValues {
 			if i >= 1 && callName == "println" {
@@ -1847,7 +1857,9 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		case strings.HasPrefix(name, "(device/riscv.CSR)."):
 			return b.emitCSROperation(instr)
 		case strings.HasPrefix(name, "syscall.Syscall") || strings.HasPrefix(name, "syscall.RawSyscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.Syscall") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscall"):
-			return b.createSyscall(instr)
+			if b.GOOS != "darwin" {
+				return b.createSyscall(instr)
+			}
 		case strings.HasPrefix(name, "syscall.rawSyscallNoError") || strings.HasPrefix(name, "golang.org/x/sys/unix.RawSyscallNoError"):
 			return b.createRawSyscallNoError(instr)
 		case name == "runtime.supportsRecover":
@@ -1865,6 +1877,11 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			return llvm.ConstInt(b.ctx.Int8Type(), panicStrategy, false), nil
 		case name == "runtime/interrupt.New":
 			return b.createInterruptGlobal(instr)
+		case name == "internal/abi.FuncPCABI0":
+			retval := b.createDarwinFuncPCABI0Call(instr)
+			if !retval.IsNil() {
+				return retval, nil
+			}
 		}
 
 		calleeType, callee = b.getFunction(fn)
@@ -1963,7 +1980,7 @@ func (b *builder) getValue(expr ssa.Value, pos token.Pos) llvm.Value {
 			return value
 		} else {
 			// indicates a compiler bug
-			panic("local has not been parsed: " + expr.String())
+			panic("SSA value not previously found in function: " + expr.String())
 		}
 	}
 }

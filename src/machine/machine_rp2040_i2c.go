@@ -24,7 +24,7 @@ var (
 // here: https://github.com/vmilea/pico_i2c_slave
 
 // Features: Taken from datasheet.
-// Default controller mode, with target mode available (not simulataneously).
+// Default controller mode, with target mode available (not simultaneously).
 // Default target address of RP2040: 0x055
 // Supports 10-bit addressing in controller mode
 // 16-element transmit buffer
@@ -36,7 +36,7 @@ var (
 // GPIO config
 // Each controller must connect its clock SCL and data SDA to one pair of GPIOs.
 // The I2C standard requires that drivers drivea signal low, or when not driven the signal will be pulled high.
-// This applies to SCL and SDA. The GPIO pads should beconfigured for:
+// This applies to SCL and SDA. The GPIO pads should be configured for:
 //  Pull-up enabled
 //  Slew rate limited
 //  Schmitt trigger enabled

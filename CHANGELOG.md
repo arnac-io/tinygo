@@ -1,3 +1,113 @@
+0.34.0
+---
+* **general**
+  - fix `GOOS=wasip1` for `tinygo test`
+  - add `-C DIR` flag
+  - add initial documentation for project governance
+  - add `-ldflags='-extldflags=...'` support
+  - improve usage message with `tinygo help` and when passing invalid parameters
+* **compiler**
+  - `builder`: remove environment variables when invoking Clang, to avoid the environment changing the behavior
+  - `builder`: check for the Go toolchain version used to compile TinyGo
+  - `cgo`: add `C.CBytes` implementation
+  - `compiler`: fix passing weirdly-padded structs as parameters to new goroutines
+  - `compiler`: support pragmas on generic functions
+  - `compiler`: do not let the slice buffer escape when casting a `[]byte` or `[]rune` to a string, to help escape analysis
+  - `compiler`: conform to the latest iteration of the wasm types proposal
+  - `loader`: don't panic when main package is not named 'main'
+  - `loader`: make sure we always return type checker errors even without type errors
+  - `transform`: optimize range over `[]byte(string)`
+* **standard library**
+  - `crypto/x509`: add package stub to build crypto/x509 on macOS
+  - `machine/usb/adc/midi`: fix `PitchBend`
+  - `os`: add `Truncate` stub for baremetal
+  - `os`: add stubs for `os.File` deadlines
+  - `os`: add internal `net.newUnixFile` for the net package
+  - `runtime`: stub runtime_{Before,After}Exec for linkage
+  - `runtime`: randomize map accesses
+  - `runtime`: support `maps.Clone`
+  - `runtime`: add more fields to `MemStats`
+  - `runtime`: implement newcoro, coroswitch to support package iter
+  - `runtime`: disallow defer in interrupts
+  - `runtime`: add support for os/signal on Linux and MacOS
+  - `runtime`: add gc layout info for some basic types to help the precise GC
+  - `runtime`: bump GC mark stack size to avoid excessive heap rescans
+* **targets**
+  - `darwin`: use Go standard library syscall package instead of a custom one
+  - `fe310`: support GPIO `PinInput`
+  - `mips`: fix compiler crash with GOMIPS=softfloat and defer
+  - `mips`: add big-endian (GOARCH=mips) support
+  - `mips`: use MIPS32 (instead of MIPS32R2) as the instruction set for wider compatibility
+  - `wasi`: add relative and absolute --dir options to wasmtime args
+  - `wasip2`: add wasmtime -S args to support network interfaces
+  - `wasm`: add `//go:wasmexport` support (for all WebAssembly targets)
+  - `wasm`: use precise instead of conservative GC for WebAssembly (including WASI)
+  - `wasm-unknown`: add bulk memory flags since basically every runtime has it now
+* **boards**
+  - add RAKwireless RAK4631
+  - add WaveShare ESP-C3-32S-Kit
+
+
+0.33.0
+---
+
+* **general**
+  - use latest version of x/tools
+  - add chromeos 9p support for flashing
+  - sort compiler error messages by source position in a package
+  - don't include prebuilt libraries in the release to simplify packaging and reduce the release tarball size
+  - show runtime panic addresses for `tinygo run`
+  - support Go 1.23 (including all new language features)
+  - `test`: support GOOS/GOARCH pairs in the `-target` flag
+  - `test`: remove message after test binary built
+* **compiler**
+  - remove unused registers for x86_64 linux syscalls
+  - remove old atomics workaround for AVR (not necessary in modern LLVM versions)
+  - support `golang.org/x/sys/unix` syscalls
+  - `builder`: remove workaround for generics race condition
+  - `builder`: add package ID to compiler and optimization error messages
+  - `builder`: show better error messages for some common linker errors
+  - `cgo`: support preprocessor macros passed on the command line
+  - `cgo`: use absolute paths for error messages
+  - `cgo`: add support for printf
+  - `loader`: handle `go list` errors inside TinyGo (for better error messages)
+  - `transform`: fix incorrect alignment of heap-to-stack transform
+  - `transform`: use thinlto-pre-link passes (instead of the full pipeline) to speed up compilation speed slightly
+* **standard library**
+  - `crypto/tls`: add CipherSuiteName and some extra fields to ConnectionSTate
+  - `internal/abi`: implement initial version of this package
+  - `machine`: use new `internal/binary` package
+  - `machine`: rewrite Reply() to fix sending long replies in I2C Target Mode
+  - `machine/usb/descriptor`: Reset joystick physical
+  - `machine/usb/descriptor`: Drop second joystick hat
+  - `machine/usb/descriptor`: Add more HID... functions
+  - `machine/usb/descriptor`: Fix encoding of values
+  - `machine/usb/hid/joystick`: Allow more hat switches
+  - `os`: add `Chown`, `Truncate`
+  - `os/user`: use stdlib version of this package
+  - `reflect`: return correct name for the `unsafe.Pointer` type
+  - `reflect`: implement `Type.Overflow*` functions
+  - `runtime`: implement dummy `getAuxv` to satisfy golang.org/x/sys/
+  - `runtime`: don't zero out new allocations for `-gc=leaking` when they are already zeroed
+  - `runtime`: simplify slice growing/appending code
+  - `runtime`: print a message when a fatal signal like SIGSEGV happens
+  - `runtime/debug`: add `GoVersion` to `debug.BuildInfo`
+  - `sync`: add `Map.Clear()`
+  - `sync/atomic`: add And* and Or* compiler intrinsics needed for Go 1.23
+  - `syscall`: add `Fork` and `Execve`
+  - `syscall`: add all MacOS errno values
+  - `testing`: stub out `T.Deadline`
+  - `unique`: implement custom (naive) version of the unique package
+* **targets**
+  - `arm`: support `GOARM=*,softfloat` (softfloat support for ARM v5, v6, and v7)
+  - `mips`: add linux/mipsle (and experimental linux/mips) support
+  - `mips`: add `GOMIPS=softfloat` support
+  - `wasip2`: add WASI preview 2 support
+  - `wasm/js`: add `node:` prefix in `require()` call of wasm_exec.js
+  - `wasm-unknown`: make sure the `os` package can be imported
+  - `wasm-unknown`: remove import-memory flag
+
+
 0.32.0
 ---
 
@@ -18,7 +128,7 @@
   - `builder`: keep un-wasm-opt'd .wasm if -work was passed
   - `builder`: make sure wasm-opt command line is printed if asked
   - `cgo`: implement shift operations in preprocessor macros
-  - `interp`: checking for methodset existance
+  - `interp`: checking for methodset existence
 
 * **standard library**
   - `machine`: add `__tinygo_spi_tx` function to simulator
@@ -217,7 +327,7 @@
   - `reflect`: add SetZero
   - `reflect`: fix iterating over maps with interface{} keys
   - `reflect`: implement Value.Grow
-  - `reflect`: remove unecessary heap allocations
+  - `reflect`: remove unnecessary heap allocations
   - `reflect`: use .key() instead of a type assert
   - `sync`: add implementation from upstream Go for OnceFunc, OnceValue, and OnceValues
 * **targets**
@@ -1896,7 +2006,7 @@
   - allow packages like github.com/tinygo-org/tinygo/src/\* by aliasing it
   - remove `//go:volatile` support  
     It has been replaced with the runtime/volatile package.
-  - allow poiners in map keys
+  - allow pointers in map keys
   - support non-constant syscall numbers
   - implement non-blocking selects
   - add support for the `-tags` flag

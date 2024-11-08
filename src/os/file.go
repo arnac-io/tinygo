@@ -257,10 +257,27 @@ func (f *File) SyscallConn() (conn syscall.RawConn, err error) {
 	return
 }
 
+// SetDeadline sets the read and write deadlines for a File.
+// Calls to SetDeadline for files that do not support deadlines will return ErrNoDeadline
+// This stub always returns ErrNoDeadline.
+// A zero value for t means I/O operations will not time out.
+func (f *File) SetDeadline(t time.Time) error {
+	if f.handle == nil {
+		return ErrClosed
+	}
+	return f.setDeadline(t)
+}
+
 // SetReadDeadline sets the deadline for future Read calls and any
 // currently-blocked Read call.
 func (f *File) SetReadDeadline(t time.Time) error {
 	return f.setReadDeadline(t)
+}
+
+// SetWriteDeadline sets the deadline for any future Write calls and any
+// currently-blocked Write call.
+func (f *File) SetWriteDeadline(t time.Time) error {
+	return f.setWriteDeadline(t)
 }
 
 // fd is an internal interface that is used to try a type assertion in order to
@@ -288,16 +305,6 @@ func (f *File) Sync() (err error) {
 		err = f.handle.Sync()
 	}
 	return
-}
-
-// Truncate is a stub, not yet implemented
-func (f *File) Truncate(size int64) (err error) {
-	if f.handle == nil {
-		err = ErrClosed
-	} else {
-		err = ErrNotImplemented
-	}
-	return &PathError{Op: "truncate", Path: f.name, Err: err}
 }
 
 // LinkError records an error during a link or symlink or rename system call and

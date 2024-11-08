@@ -180,7 +180,7 @@ func Load(config *compileopts.Config, inputPkg string, typeChecker types.Config)
 			if len(fields) >= 2 {
 				// There is some file/line/column information.
 				if n, err := strconv.Atoi(fields[len(fields)-2]); err == nil {
-					// Format: filename.go:line:colum
+					// Format: filename.go:line:column
 					pos.Filename = strings.Join(fields[:len(fields)-2], ":")
 					pos.Line = n
 					pos.Column, _ = strconv.Atoi(fields[len(fields)-1])
@@ -418,8 +418,12 @@ func (p *Package) Check() error {
 	packageName := p.ImportPath
 	if p == p.program.MainPkg() {
 		if p.Name != "main" {
-			// Sanity check. Should not ever trigger.
-			panic("expected main package to have name 'main'")
+			return Errors{p, []error{
+				scanner.Error{
+					Pos: p.program.fset.Position(p.Files[0].Name.Pos()),
+					Msg: fmt.Sprintf("expected main package to have name \"main\", not %#v", p.Name),
+				},
+			}}
 		}
 		packageName = "main"
 	}
@@ -428,7 +432,15 @@ func (p *Package) Check() error {
 		if err, ok := err.(Errors); ok {
 			return err
 		}
-		return Errors{p, typeErrors}
+		if len(typeErrors) != 0 {
+			// Got type errors, so return them.
+			return Errors{p, typeErrors}
+		}
+		// This can happen in some weird cases.
+		// The only case I know is when compiling a Go 1.23 program, with a
+		// TinyGo version that supports Go 1.23 but is compiled using Go 1.22.
+		// So this should be pretty rare.
+		return Errors{p, []error{err}}
 	}
 	p.Pkg = typesPkg
 

@@ -165,6 +165,8 @@ func main() {
 	println("C.GoString(nil):", C.GoString(nil))
 	println("len(C.GoStringN(nil, 0)):", len(C.GoStringN(nil, 0)))
 	println("len(C.GoBytes(nil, 0)):", len(C.GoBytes(nil, 0)))
+	println("len(C.GoBytes(C.CBytes(nil),0)):", len(C.GoBytes(C.CBytes(nil), 0)))
+	println(`rountrip CBytes:`, C.GoString((*C.char)(C.CBytes([]byte("hello\000")))))
 
 	// libc: test whether C functions work at all.
 	buf1 := []byte("foobar\x00")
@@ -179,6 +181,10 @@ func main() {
 	// libc: test basic stdio functionality
 	putsBuf := []byte("line written using C puts\x00")
 	C.puts((*C.char)(unsafe.Pointer(&putsBuf[0])))
+
+	// libc: test whether printf works in C.
+	printfBuf := []byte("line written using C printf with value=%d\n\x00")
+	C.printf_single_int((*C.char)(unsafe.Pointer(&printfBuf[0])), -21)
 }
 
 func printUnion(union C.joined_t) C.joined_t {

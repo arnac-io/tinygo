@@ -23,9 +23,9 @@ func run() {
 	go func() {
 		initAll()
 		callMain()
-		schedulerDone = true
+		mainExited = true
 	}()
-	scheduler()
+	scheduler(false)
 }
 
 const hasScheduler = true

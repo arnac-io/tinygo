@@ -8,6 +8,7 @@
 package llvmutil
 
 import (
+	"encoding/binary"
 	"strconv"
 	"strings"
 
@@ -207,7 +208,7 @@ func AppendToGlobal(mod llvm.Module, globalName string, values ...llvm.Value) {
 	used.SetLinkage(llvm.AppendingLinkage)
 }
 
-// Return the LLVM major version.
+// Version returns the LLVM major version.
 func Version() int {
 	majorStr := strings.Split(llvm.Version, ".")[0]
 	major, err := strconv.Atoi(majorStr)
@@ -215,4 +216,14 @@ func Version() int {
 		panic("unexpected error while parsing LLVM version: " + err.Error()) // should not happen
 	}
 	return major
+}
+
+// Return the byte order for the given target triple. Most targets are little
+// endian, but for example MIPS can be big-endian.
+func ByteOrder(target string) binary.ByteOrder {
+	if strings.HasPrefix(target, "mips-") {
+		return binary.BigEndian
+	} else {
+		return binary.LittleEndian
+	}
 }
