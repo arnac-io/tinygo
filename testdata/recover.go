@@ -1,5 +1,12 @@
 package main
 
+import (
+	"runtime"
+	"sync"
+)
+
+var wg sync.WaitGroup
+
 func main() {
 	println("# simple recover")
 	recoverSimple()
@@ -22,6 +29,9 @@ func main() {
 
 	println("\n# defer panic")
 	deferPanic()
+
+	println("\n# runtime.Goexit")
+	runtimeGoexit()
 }
 
 func recoverSimple() {
@@ -102,6 +112,19 @@ func deferPanic() {
 
 	defer panic("deferred panic")
 	println("defer panic")
+}
+
+func runtimeGoexit() {
+	wg.Add(1)
+	go func() {
+		defer func() {
+			println("Goexit deferred function, recover is nil:", recover() == nil)
+			wg.Done()
+		}()
+
+		runtime.Goexit()
+	}()
+	wg.Wait()
 }
 
 func printitf(msg string, itf interface{}) {
