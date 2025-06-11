@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -183,6 +184,15 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 		typeFieldTypes := []*types.Var{
 			types.NewVar(token.NoPos, nil, "kind", types.Typ[types.Int8]),
 		}
+		var methods []*types.Func
+		for i := 0; i < ms.Len(); i++ {
+			methods = append(methods, ms.At(i).Obj().(*types.Func))
+		}
+		methodSetType := types.NewStruct([]*types.Var{
+			types.NewVar(token.NoPos, nil, "length", types.Typ[types.Uintptr]),
+			types.NewVar(token.NoPos, nil, "methods", types.NewArray(types.Typ[types.UnsafePointer], int64(len(methods)))),
+		}, nil)
+		methodSetValue := c.getMethodSetValue(methods)
 		switch typ := typ.(type) {
 		case *types.Basic:
 			typeFieldTypes = append(typeFieldTypes,
@@ -199,6 +209,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				types.NewVar(token.NoPos, nil, "ptrTo", types.Typ[types.UnsafePointer]),
 				types.NewVar(token.NoPos, nil, "underlying", types.Typ[types.UnsafePointer]),
 				types.NewVar(token.NoPos, nil, "pkgpath", types.Typ[types.UnsafePointer]),
+				types.NewVar(token.NoPos, nil, "methods", methodSetType),
 				types.NewVar(token.NoPos, nil, "name", types.NewArray(types.Typ[types.Int8], int64(len(pkgname)+1+len(name)+1))),
 			)
 		case *types.Chan:
@@ -217,6 +228,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			typeFieldTypes = append(typeFieldTypes,
 				types.NewVar(token.NoPos, nil, "numMethods", types.Typ[types.Uint16]),
 				types.NewVar(token.NoPos, nil, "elementType", types.Typ[types.UnsafePointer]),
+				types.NewVar(token.NoPos, nil, "methods", methodSetType),
 			)
 		case *types.Array:
 			typeFieldTypes = append(typeFieldTypes,
@@ -241,12 +253,13 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				types.NewVar(token.NoPos, nil, "size", types.Typ[types.Uint32]),
 				types.NewVar(token.NoPos, nil, "numFields", types.Typ[types.Uint16]),
 				types.NewVar(token.NoPos, nil, "fields", types.NewArray(c.getRuntimeType("structField"), int64(typ.NumFields()))),
+				types.NewVar(token.NoPos, nil, "methods", methodSetType),
 			)
 		case *types.Interface:
 			typeFieldTypes = append(typeFieldTypes,
 				types.NewVar(token.NoPos, nil, "ptrTo", types.Typ[types.UnsafePointer]),
+				types.NewVar(token.NoPos, nil, "methods", methodSetType),
 			)
-			// TODO: methods
 		case *types.Signature:
 			typeFieldTypes = append(typeFieldTypes,
 				types.NewVar(token.NoPos, nil, "ptrTo", types.Typ[types.UnsafePointer]),
@@ -297,6 +310,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				c.getTypeCode(types.NewPointer(typ)),                        // ptrTo
 				c.getTypeCode(typ.Underlying()),                             // underlying
 				pkgPathPtr,                                                  // pkgpath pointer
+				methodSetValue,                                              // methods
 				c.ctx.ConstString(pkgname+"."+name+"\x00", false),           // name
 			}
 			metabyte |= 1 << 5 // "named" flag
@@ -326,6 +340,7 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			typeFields = []llvm.Value{
 				llvm.ConstInt(c.ctx.Int16Type(), uint64(numMethods), false), // numMethods
 				c.getTypeCode(typ.Elem()),
+				methodSetValue, // methods
 			}
 		case *types.Array:
 			typeFields = []llvm.Value{
@@ -407,9 +422,12 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 				}))
 			}
 			typeFields = append(typeFields, llvm.ConstArray(structFieldType, fields))
+			typeFields = append(typeFields, methodSetValue)
 		case *types.Interface:
-			typeFields = []llvm.Value{c.getTypeCode(types.NewPointer(typ))}
-			// TODO: methods
+			typeFields = []llvm.Value{
+				c.getTypeCode(types.NewPointer(typ)),
+				methodSetValue,
+			}
 		case *types.Signature:
 			typeFields = []llvm.Value{c.getTypeCode(types.NewPointer(typ))}
 			// TODO: params, return values, etc
@@ -688,7 +706,7 @@ func (b *builder) createTypeAssert(expr *ssa.TypeAssert) llvm.Value {
 	assertedType := b.getLLVMType(expr.AssertedType)
 
 	actualTypeNum := b.CreateExtractValue(itf, 0, "interface.type")
-	commaOk := llvm.Value{}
+	var commaOk llvm.Value
 
 	if intf, ok := expr.AssertedType.Underlying().(*types.Interface); ok {
 		if intf.Empty() {
@@ -696,17 +714,16 @@ func (b *builder) createTypeAssert(expr *ssa.TypeAssert) llvm.Value {
 			// This type assertion always succeeds, so we can just set commaOk to true.
 			commaOk = llvm.ConstInt(b.ctx.Int1Type(), 1, true)
 		} else {
-			// Type assert on interface type with methods.
-			// This is a call to an interface type assert function.
-			// The interface lowering pass will define this function by filling it
-			// with a type switch over all concrete types that implement this
-			// interface, and returning whether it's one of the matched types.
-			// This is very different from how interface asserts are implemented in
-			// the main Go compiler, where the runtime checks whether the type
-			// implements each method of the interface. See:
+			// Type assert using interface type with methods.
+			// This is implemented using a runtime call, which checks that the
+			// type implements each method of the interface.
+			// For comparison, here is how the Go compiler does this (which is
+			// very similar):
 			// https://research.swtch.com/interfaces
-			fn := b.getInterfaceImplementsFunc(expr.AssertedType)
-			commaOk = b.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{actualTypeNum}, "")
+			commaOk = b.createRuntimeCall("typeImplementsMethodSet", []llvm.Value{
+				actualTypeNum,
+				b.getInterfaceMethodSet(intf),
+			}, "")
 		}
 	} else {
 		name, _ := getTypeCodeName(expr.AssertedType)
@@ -781,6 +798,68 @@ func (c *compilerContext) getMethodsString(itf *types.Interface) string {
 		methods[i] = c.getMethodSignatureName(itf.Method(i))
 	}
 	return strings.Join(methods, "; ")
+}
+
+// Get the global that contains an interface method set, creating it if needed.
+func (c *compilerContext) getInterfaceMethodSet(t *types.Interface) llvm.Value {
+	s, _ := getTypeCodeName(t)
+	methodSetName := s + "$itfmethods"
+	methodSet := c.mod.NamedFunction(methodSetName)
+	if methodSet.IsNil() {
+		var methods []*types.Func
+		for i := 0; i < t.NumMethods(); i++ {
+			methods = append(methods, t.Method(i))
+		}
+		if len(methods) == 0 {
+			// This *should* be unreachable: the caller checks whether the
+			// interface is empty before creating a method set.
+			panic("unreachable")
+		}
+
+		methodSetValue := c.getMethodSetValue(methods)
+		methodSet = llvm.AddGlobal(c.mod, methodSetValue.Type(), methodSetName)
+		methodSet.SetInitializer(methodSetValue)
+		methodSet.SetGlobalConstant(true)
+		methodSet.SetLinkage(llvm.LinkOnceODRLinkage)
+		methodSet.SetAlignment(c.targetData.ABITypeAlignment(methodSetValue.Type()))
+		methodSet.SetUnnamedAddr(true)
+	}
+
+	return methodSet
+}
+
+// Get the method set value that is used in a number of type structs.
+func (c *compilerContext) getMethodSetValue(methods []*types.Func) llvm.Value {
+	// Create a sorted list of method names.
+	var methodRefNames []string
+	for _, method := range methods {
+		name := method.Name()
+		if !token.IsExported(name) {
+			name = method.Pkg().Path() + "." + name
+		}
+		s, _ := getTypeCodeName(method.Type())
+		methodRefNames = append(methodRefNames, "reflect/types.signature:"+name+":"+s)
+	}
+	sort.Strings(methodRefNames)
+
+	// Turn this slice of strings in a slice of global variables.
+	var methodRefValues []llvm.Value
+	for _, name := range methodRefNames {
+		value := c.mod.NamedGlobal(name)
+		if value.IsNil() {
+			value = llvm.AddGlobal(c.mod, c.ctx.Int8Type(), name)
+			value.SetInitializer(llvm.ConstNull(c.ctx.Int8Type()))
+			value.SetGlobalConstant(true)
+			value.SetLinkage(llvm.LinkOnceODRLinkage)
+			value.SetAlignment(1)
+		}
+		methodRefValues = append(methodRefValues, value)
+	}
+
+	return c.ctx.ConstStruct([]llvm.Value{
+		llvm.ConstInt(c.uintptrType, uint64(len(methodRefValues)), false),
+		llvm.ConstArray(c.dataPtrType, methodRefValues),
+	}, false)
 }
 
 // getInterfaceImplementsFunc returns a declared function that works as a type
