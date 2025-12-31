@@ -10,12 +10,12 @@ commands:
     steps:
       - restore_cache:
           keys:
-            - llvm-source-18-v1
+            - llvm-source-19-v1
       - run:
           name: "Fetch LLVM source"
           command: make llvm-source
       - save_cache:
-          key: llvm-source-18-v1
+          key: llvm-source-19-v1
           paths:
             - llvm-project/clang/lib/Headers
             - llvm-project/clang/include
@@ -73,14 +73,6 @@ commands:
             - go-cache-v4-{{ checksum "go.mod" }}
       - llvm-source-linux
       - run: go install -tags=llvm<<parameters.llvm>> .
-      - restore_cache:
-          keys:
-            - wasi-libc-sysroot-systemclang-v7
-      - run: make wasi-libc
-      - save_cache:
-          key: wasi-libc-sysroot-systemclang-v7
-          paths:
-            - lib/wasi-libc/sysroot
       - when:
           condition: <<parameters.fmt-check>>
           steps:
@@ -90,6 +82,8 @@ commands:
               name: Check Go code formatting
               command: make fmt-check lint
       - run: make gen-device -j4
+      # TODO: change this to -skip='TestErrors|TestWasm' with Go 1.20
+      - run: go test -tags=llvm<<parameters.llvm>> -short -run='TestBuild|TestTest|TestGetList|TestTraceback'
       - run: make smoketest XTENSA=0
       - save_cache:
           key: go-cache-v4-{{ checksum "go.mod" }}-{{ .Environment.CIRCLE_BUILD_NUM }}
@@ -98,28 +92,28 @@ commands:
             - /go/pkg/mod
 
 jobs:
-  test-llvm15-go119:
+  test-oldest:
+    # This tests our lowest supported versions of Go and LLVM, to make sure at
+    # least the smoke tests still pass.
     docker:
-      - image: golang:1.19-bullseye
+      - image: golang:1.22-bullseye
     steps:
       - test-linux:
           llvm: "15"
-          # "make lint" fails before go 1.21 because internal/tools/go.mod specifies packages that require go 1.21
-          fmt-check: false
     resource_class: large
-  test-llvm18-go123:
+  test-newest:
+    # This tests the latest supported LLVM version when linking against system
+    # libraries.
     docker:
-      - image: golang:1.23-bullseye
+      - image: golang:1.25-bullseye
     steps:
       - test-linux:
-          llvm: "18"
+          llvm: "20"
     resource_class: large
 
 workflows:
   test-all:
     jobs:
-      # This tests our lowest supported versions of Go and LLVM, to make sure at
-      # least the smoke tests still pass.
-      - test-llvm15-go119
-      # This tests LLVM 18 support when linking against system libraries.
-      - test-llvm18-go123
+      - test-oldest
+      # disable this test, since CircleCI seems unable to download due to rate-limits on Dockerhub.
+      # - test-newest

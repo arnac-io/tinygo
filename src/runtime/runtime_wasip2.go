@@ -12,8 +12,6 @@ import (
 	"internal/cm"
 )
 
-type timeUnit int64
-
 func init() {
 	wasiclirun.Exports.Run = func() cm.BoolResult {
 		callMain()
@@ -51,7 +49,4 @@ func sleepTicks(d timeUnit) {
 
 func ticks() timeUnit {
 	return timeUnit(monotonicclock.Now())
-}
-
-func beforeExit() {
 }

@@ -1,3 +1,7 @@
+// Do not reorder instructions to insert a branch delay slot.
+// We know what we're doing, and will manually fill the branch delay slot.
+.set noreorder
+
 .section .text.tinygo_startTask
 .global  tinygo_startTask
 .type    tinygo_startTask, %function
@@ -18,7 +22,7 @@ tinygo_startTask:
     nop
 
     // After return, exit this goroutine. This is a tail call.
-    j     tinygo_pause
+    j     tinygo_task_exit
     nop
 
 .section .text.tinygo_swapTask

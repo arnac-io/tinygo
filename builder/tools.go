@@ -32,9 +32,25 @@ func runCCompiler(flags ...string) error {
 	cmd.Stderr = os.Stderr
 
 	// Make sure the command doesn't use any environmental variables.
-	// Most importantly, it should not use C_INCLUDE_PATH and the like. But
-	// removing all environmental variables also works.
+	// Most importantly, it should not use C_INCLUDE_PATH and the like.
 	cmd.Env = []string{}
+
+	// Let some environment variables through. One important one is the
+	// temporary directory, especially on Windows it looks like Clang breaks if
+	// the temporary directory has not been set.
+	// See: https://github.com/tinygo-org/tinygo/issues/4557
+	// Also see: https://github.com/llvm/llvm-project/blob/release/18.x/llvm/lib/Support/Unix/Path.inc#L1435
+	for _, env := range os.Environ() {
+		// We could parse the key and look it up in a map, but since there are
+		// only a few keys iterating through them is easier and maybe even
+		// faster.
+		for _, prefix := range []string{"TMPDIR=", "TMP=", "TEMP=", "TEMPDIR="} {
+			if strings.HasPrefix(env, prefix) {
+				cmd.Env = append(cmd.Env, env)
+				break
+			}
+		}
+	}
 
 	return cmd.Run()
 }
@@ -98,8 +114,8 @@ func parseLLDErrors(text string) error {
 
 		// Check for undefined symbols.
 		// This can happen in some cases like with CGo and //go:linkname tricker.
-		if matches := regexp.MustCompile(`^ld.lld: error: undefined symbol: (.*)\n`).FindStringSubmatch(message); matches != nil {
-			symbolName := matches[1]
+		if matches := regexp.MustCompile(`^ld.lld(-[0-9]+)?: error: undefined symbol: (.*)\n`).FindStringSubmatch(message); matches != nil {
+			symbolName := matches[2]
 			for _, line := range strings.Split(message, "\n") {
 				matches := regexp.MustCompile(`referenced by .* \(((.*):([0-9]+))\)`).FindStringSubmatch(line)
 				if matches != nil {
@@ -118,9 +134,9 @@ func parseLLDErrors(text string) error {
 		}
 
 		// Check for flash/RAM overflow.
-		if matches := regexp.MustCompile(`^ld.lld: error: section '(.*?)' will not fit in region '(.*?)': overflowed by ([0-9]+) bytes$`).FindStringSubmatch(message); matches != nil {
-			region := matches[2]
-			n, err := strconv.ParseUint(matches[3], 10, 64)
+		if matches := regexp.MustCompile(`^ld.lld(-[0-9]+)?: error: section '(.*?)' will not fit in region '(.*?)': overflowed by ([0-9]+) bytes$`).FindStringSubmatch(message); matches != nil {
+			region := matches[3]
+			n, err := strconv.ParseUint(matches[4], 10, 64)
 			if err != nil {
 				// Should not happen at all (unless it overflows an uint64 for some reason).
 				continue

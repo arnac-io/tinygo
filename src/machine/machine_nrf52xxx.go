@@ -12,24 +12,23 @@ func CPUFrequency() uint32 {
 	return 64000000
 }
 
+var adcVDDHPin = Pin(254) // special pin number for VDDH on the nrf52840
+
 // InitADC initializes the registers needed for ADC.
 func InitADC() {
-	return // no specific setup on nrf52 machine.
+	// Enable ADC.
+	// The ADC does not consume a noticeable amount of current by being enabled.
+	nrf.SAADC.ENABLE.Set(nrf.SAADC_ENABLE_ENABLE_Enabled << nrf.SAADC_ENABLE_ENABLE_Pos)
 }
 
 // Configure configures an ADC pin to be able to read analog data.
-func (a ADC) Configure(config ADCConfig) {
-	// Enable ADC.
-	// The ADC does not consume a noticeable amount of current simply by being
-	// enabled.
-	nrf.SAADC.ENABLE.Set(nrf.SAADC_ENABLE_ENABLE_Enabled << nrf.SAADC_ENABLE_ENABLE_Pos)
-
-	// Use fixed resolution of 12 bits.
-	// TODO: is it useful for users to change this?
-	nrf.SAADC.RESOLUTION.Set(nrf.SAADC_RESOLUTION_VAL_12bit)
-
+// Reference voltage can be 150, 300, 600, 1200, 1800, 2400, 3000(default), 3600 mV
+// Resolution can be 8, 10, 12(default), 14 bits
+// SampleTime will be ceiled to 3(default), 5, 10, 15, 20 or 40(max) µS respectively
+// Samples can be 1(default), 2, 4, 8, 16, 32, 64, 128, 256 samples
+func (a *ADC) Configure(config ADCConfig) {
 	var configVal uint32 = nrf.SAADC_CH_CONFIG_RESP_Bypass<<nrf.SAADC_CH_CONFIG_RESP_Pos |
-		nrf.SAADC_CH_CONFIG_RESP_Bypass<<nrf.SAADC_CH_CONFIG_RESN_Pos |
+		nrf.SAADC_CH_CONFIG_RESN_Bypass<<nrf.SAADC_CH_CONFIG_RESN_Pos |
 		nrf.SAADC_CH_CONFIG_REFSEL_Internal<<nrf.SAADC_CH_CONFIG_REFSEL_Pos |
 		nrf.SAADC_CH_CONFIG_MODE_SE<<nrf.SAADC_CH_CONFIG_MODE_Pos
 
@@ -51,11 +50,26 @@ func (a ADC) Configure(config ADCConfig) {
 	case 3600: // 3.6V
 		configVal |= nrf.SAADC_CH_CONFIG_GAIN_Gain1_6 << nrf.SAADC_CH_CONFIG_GAIN_Pos
 	default:
-		// TODO: return an error
+		// TODO: return an error, will that interfere with any interfaced if one will be?
 	}
 
-	// Source resistance, according to table 89 on page 364 of the nrf52832 datasheet.
-	// https://infocenter.nordicsemi.com/pdf/nRF52832_PS_v1.4.pdf
+	var resolution uint32
+	switch config.Resolution {
+	case 8:
+		resolution = nrf.SAADC_RESOLUTION_VAL_8bit
+	case 10:
+		resolution = nrf.SAADC_RESOLUTION_VAL_10bit
+	case 12:
+		resolution = nrf.SAADC_RESOLUTION_VAL_12bit
+	case 14:
+		resolution = nrf.SAADC_RESOLUTION_VAL_14bit
+	default:
+		resolution = nrf.SAADC_RESOLUTION_VAL_12bit
+	}
+	nrf.SAADC.RESOLUTION.Set(resolution)
+
+	// Source resistance, according to table 41 on page 676 of the nrf52832 datasheet.
+	// https://docs-be.nordicsemi.com/bundle/ps_nrf52840/attach/nRF52840_PS_v1.11.pdf?_LANG=enus
 	if config.SampleTime <= 3 { // <= 10kΩ
 		configVal |= nrf.SAADC_CH_CONFIG_TACQ_3us << nrf.SAADC_CH_CONFIG_TACQ_Pos
 	} else if config.SampleTime <= 5 { // <= 40kΩ
@@ -102,46 +116,45 @@ func (a ADC) Configure(config ADCConfig) {
 	nrf.SAADC.CH[0].CONFIG.Set(configVal)
 }
 
-// Get returns the current value of a ADC pin in the range 0..0xffff.
-func (a ADC) Get() uint16 {
-	var pwmPin uint32
+// Get returns the current value of an ADC pin in the range 0..0xffff.
+func (a *ADC) Get() uint16 {
+	var adcPin uint32
 	var rawValue volatile.Register16
 
 	switch a.Pin {
 	case 2:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput0
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput0
 	case 3:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput1
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput1
 	case 4:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput2
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput2
 	case 5:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput3
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput3
 	case 28:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput4
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput4
 	case 29:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput5
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput5
 	case 30:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput6
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput6
 	case 31:
-		pwmPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput7
-
+		adcPin = nrf.SAADC_CH_PSELP_PSELP_AnalogInput7
+	case adcVDDHPin:
+		if Device == "nrf52840" {
+			adcPin = 0x0D // VDDHDIV5 on the nrf52840
+		} else {
+			return 0
+		}
 	default:
 		return 0
 	}
 
 	// Set pin to read.
-	nrf.SAADC.CH[0].PSELN.Set(pwmPin)
-	nrf.SAADC.CH[0].PSELP.Set(pwmPin)
+	nrf.SAADC.CH[0].PSELP.Set(adcPin)
 
 	// Destination for sample result.
-	nrf.SAADC.RESULT.PTR.Set(uint32(uintptr(unsafe.Pointer(&rawValue))))
+	// Note: rawValue doesn't need to be kept alive for the GC, since the
+	// volatile read later will force it to stay alive.
+	nrf.SAADC.RESULT.PTR.Set(uint32(unsafeNoEscape(unsafe.Pointer(&rawValue))))
 	nrf.SAADC.RESULT.MAXCNT.Set(1) // One sample
 
 	// Start tasks.
@@ -164,13 +177,27 @@ func (a ADC) Get() uint16 {
 	}
 	nrf.SAADC.EVENTS_STOPPED.Set(0)
 
+	// convert to 16 bit resolution/value
+	var resolutionAdjustment uint8
+	switch nrf.SAADC.RESOLUTION.Get() {
+	case nrf.SAADC_RESOLUTION_VAL_8bit:
+		resolutionAdjustment = 8
+	case nrf.SAADC_RESOLUTION_VAL_10bit:
+		resolutionAdjustment = 6
+	case nrf.SAADC_RESOLUTION_VAL_12bit:
+		resolutionAdjustment = 4
+	case nrf.SAADC_RESOLUTION_VAL_14bit:
+		resolutionAdjustment = 2
+	default:
+		resolutionAdjustment = 4 // 12bit
+	}
+
 	value := int16(rawValue.Get())
 	if value < 0 {
 		value = 0
 	}
 
-	// Return 16-bit result from 12-bit value.
-	return uint16(value << 4)
+	return uint16(value << resolutionAdjustment)
 }
 
 // SPI on the NRF.
@@ -181,9 +208,9 @@ type SPI struct {
 
 // There are 3 SPI interfaces on the NRF528xx.
 var (
-	SPI0 = SPI{Bus: nrf.SPIM0, buf: new([1]byte)}
-	SPI1 = SPI{Bus: nrf.SPIM1, buf: new([1]byte)}
-	SPI2 = SPI{Bus: nrf.SPIM2, buf: new([1]byte)}
+	SPI0 = &SPI{Bus: nrf.SPIM0, buf: new([1]byte)}
+	SPI1 = &SPI{Bus: nrf.SPIM1, buf: new([1]byte)}
+	SPI2 = &SPI{Bus: nrf.SPIM2, buf: new([1]byte)}
 )
 
 // SPIConfig is used to store config info for SPI.
@@ -196,8 +223,8 @@ type SPIConfig struct {
 	Mode      uint8
 }
 
-// Configure is intended to setup the SPI interface.
-func (spi SPI) Configure(config SPIConfig) error {
+// Configure is intended to set up the SPI interface.
+func (spi *SPI) Configure(config SPIConfig) error {
 	// Disable bus to configure it
 	spi.Bus.ENABLE.Set(nrf.SPIM_ENABLE_ENABLE_Disabled)
 
@@ -270,7 +297,7 @@ func (spi SPI) Configure(config SPIConfig) error {
 }
 
 // Transfer writes/reads a single byte using the SPI interface.
-func (spi SPI) Transfer(w byte) (byte, error) {
+func (spi *SPI) Transfer(w byte) (byte, error) {
 	buf := spi.buf[:]
 	buf[0] = w
 	err := spi.Tx(buf[:], buf[:])
@@ -282,21 +309,19 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 // as bytes read. Therefore, if the number of bytes don't match it will be
 // padded until they fit: if len(w) > len(r) the extra bytes received will be
 // dropped and if len(w) < len(r) extra 0 bytes will be sent.
-func (spi SPI) Tx(w, r []byte) error {
-	// Unfortunately the hardware (on the nrf52832) only supports up to 255
-	// bytes in the buffers, so if either w or r is longer than that the
-	// transfer needs to be broken up in pieces.
-	// The nrf52840 supports far larger buffers however, which isn't yet
-	// supported.
+func (spi *SPI) Tx(w, r []byte) error {
+	// Unfortunately the hardware (on the nrf52832) only supports a limited
+	// amount of bytes in the buffers (depending on the chip), so if either w or
+	// r is longer than that the transfer needs to be broken up in pieces.
 	for len(r) != 0 || len(w) != 0 {
 		// Prepare the SPI transfer: set the DMA pointers and lengths.
 		// read buffer
 		nr := uint32(len(r))
 		if nr > 0 {
-			if nr > 255 {
-				nr = 255
+			if nr > spiMaxBufferSize {
+				nr = spiMaxBufferSize
 			}
-			spi.Bus.RXD.PTR.Set(uint32(uintptr(unsafe.Pointer(&r[0]))))
+			spi.Bus.RXD.PTR.Set(uint32(unsafeNoEscape(unsafe.Pointer(unsafe.SliceData(r)))))
 			r = r[nr:]
 		}
 		spi.Bus.RXD.MAXCNT.Set(nr)
@@ -304,10 +329,10 @@ func (spi SPI) Tx(w, r []byte) error {
 		// write buffer
 		nw := uint32(len(w))
 		if nw > 0 {
-			if nw > 255 {
-				nw = 255
+			if nw > spiMaxBufferSize {
+				nw = spiMaxBufferSize
 			}
-			spi.Bus.TXD.PTR.Set(uint32(uintptr(unsafe.Pointer(&w[0]))))
+			spi.Bus.TXD.PTR.Set(uint32(unsafeNoEscape(unsafe.Pointer(unsafe.SliceData(w)))))
 			w = w[nw:]
 		}
 		spi.Bus.TXD.MAXCNT.Set(nw)
@@ -317,9 +342,15 @@ func (spi SPI) Tx(w, r []byte) error {
 		// finished if the transfer is send-only (a common case).
 		spi.Bus.TASKS_START.Set(1)
 		for spi.Bus.EVENTS_END.Get() == 0 {
+			gosched()
 		}
 		spi.Bus.EVENTS_END.Set(0)
 	}
+
+	// Make sure the w and r buffers stay alive for the GC until this point,
+	// since they are used by the hardware but not otherwise visible.
+	keepAliveNoEscape(unsafe.Pointer(unsafe.SliceData(r)))
+	keepAliveNoEscape(unsafe.Pointer(unsafe.SliceData(w)))
 
 	return nil
 }

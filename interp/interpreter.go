@@ -287,9 +287,17 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				// Get the object layout, if it is available.
 				llvmLayoutType := r.getLLVMTypeFromLayout(operands[2])
 
+				// Get the alignment of the memory to be allocated.
+				alignment := 0 // use default alignment if unset
+				alignAttr := inst.llvmInst.GetCallSiteEnumAttribute(0, llvm.AttributeKindID("align"))
+				if !alignAttr.IsNil() {
+					alignment = int(alignAttr.GetEnumValue())
+				}
+
 				// Create the object.
 				alloc := object{
 					globalName:     r.pkgName + "$alloc",
+					align:          alignment,
 					llvmLayoutType: llvmLayoutType,
 					buffer:         newRawValue(uint32(size)),
 					size:           uint32(size),
@@ -356,9 +364,22 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 						continue
 					}
 					nBytes := uint32(n * elemSize)
+					srcObj := mem.get(src.index())
 					dstObj := mem.getWritable(dst.index())
+					if srcObj.buffer == nil || dstObj.buffer == nil {
+						// If the buffer is nil, it means the slice is external.
+						// This can happen for example when copying data out of
+						// a //go:embed slice, which is not available at interp
+						// time.
+						// See: https://github.com/tinygo-org/tinygo/issues/4895
+						err := r.runAtRuntime(fn, inst, locals, &mem, indent)
+						if err != nil {
+							return nil, mem, err
+						}
+						continue
+					}
 					dstBuf := dstObj.buffer.asRawValue(r)
-					srcBuf := mem.get(src.index()).buffer.asRawValue(r)
+					srcBuf := srcObj.buffer.asRawValue(r)
 					copy(dstBuf.buf[dst.offset():dst.offset()+nBytes], srcBuf.buf[src.offset():])
 					dstObj.buffer = dstBuf
 					mem.put(dst.index(), dstObj)
@@ -556,7 +577,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 						// runtime instead of at compile time. But we need to
 						// revert any changes made by the call first.
 						if r.debug {
-							fmt.Fprintln(os.Stderr, indent+"!! revert because of error:", callErr.Err)
+							fmt.Fprintln(os.Stderr, indent+"!! revert because of error:", callErr.Error())
 						}
 						callMem.revert()
 						err := r.runAtRuntime(fn, inst, locals, &mem, indent)
@@ -646,6 +667,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				globalName: r.pkgName + "$alloca",
 				buffer:     newRawValue(uint32(size)),
 				size:       uint32(size),
+				align:      inst.llvmInst.Alignment(),
 			}
 			index := len(r.objects)
 			r.objects = append(r.objects, alloca)
@@ -961,9 +983,9 @@ func (r *runner) runAtRuntime(fn *function, inst instruction, locals []value, me
 	case llvm.Call:
 		llvmFn := operands[len(operands)-1]
 		args := operands[:len(operands)-1]
-		for _, arg := range args {
-			if arg.Type().TypeKind() == llvm.PointerTypeKind {
-				err := mem.markExternalStore(arg)
+		for _, op := range operands {
+			if op.Type().TypeKind() == llvm.PointerTypeKind {
+				err := mem.markExternalStore(op)
 				if err != nil {
 					return r.errorAt(inst, err)
 				}

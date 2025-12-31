@@ -4,6 +4,8 @@ package machine
 
 import (
 	"crypto/rand"
+	"errors"
+	"slices"
 )
 
 // Dummy machine package that calls out to external functions.
@@ -48,6 +50,103 @@ func gpioSet(pin Pin, value bool)
 //export __tinygo_gpio_get
 func gpioGet(pin Pin) bool
 
+// Generic PWM/timer peripheral. Properties can be configured depending on the
+// hardware.
+type timerType struct {
+	// Static properties.
+	instance    int32
+	frequency   uint64
+	bits        int
+	prescalers  []int
+	channelPins [][]Pin
+
+	// Configured 'top' value.
+	top uint32
+}
+
+// Configure the PWM/timer peripheral.
+func (t *timerType) Configure(config PWMConfig) error {
+	// Note: for very large period values, this multiplication will overflow.
+	top := config.Period * t.frequency / 1e9
+	if config.Period == 0 {
+		top = 0xffff // default for LEDs
+	}
+
+	// The maximum value that can be stored with the given number of bits in
+	// this timer.
+	maxTop := uint64(1)<<uint64(t.bits) - 1
+
+	// Look for an appropriate prescaler value.
+	var prescaler int
+	for _, div := range t.prescalers {
+		if top/uint64(div) <= maxTop {
+			prescaler = div
+			top = top / uint64(div)
+			break
+		}
+	}
+	if prescaler == 0 {
+		return ErrPWMPeriodTooLong
+	}
+
+	// Set these values as the configuration.
+	t.top = uint32(top)
+	pwmConfigure(t.instance, float64(t.frequency)/float64(prescaler), uint32(top))
+
+	return nil
+}
+
+// Channel returns a PWM channel for the given pin. Note that one channel may be
+// shared between multiple pins, and so will have the same duty cycle. If this
+// is not desirable, look for a different PWM/timer peripheral or consider using
+// a different pin.
+func (t *timerType) Channel(pin Pin) (uint8, error) {
+	for ch, pins := range t.channelPins {
+		// For nrf52xxx chips specifically we can assign any channel to any pin.
+		// We use a similar (identical?) logic to the hardware implementation,
+		// and pick the first empty channel.
+		if pins == nil {
+			t.channelPins[ch] = []Pin{pin}
+			pwmChannelConfigure(t.instance, int32(ch), pin)
+			return uint8(ch), nil
+		}
+
+		// Check whether the pin can be used on this channel.
+		for _, p := range pins {
+			if p == pin {
+				pwmChannelConfigure(t.instance, int32(ch), pin)
+				return uint8(ch), nil
+			}
+		}
+	}
+
+	return 0, ErrInvalidOutputPin
+}
+
+func (t *timerType) Set(channel uint8, value uint32) {
+	pwmChannelSet(t.instance, channel, value)
+}
+
+// Top returns the current counter top, for use in duty cycle calculation. It
+// will only change with a call to Configure or SetPeriod, otherwise it is
+// constant.
+//
+// The value returned here is hardware dependent. In general, it's best to treat
+// it as an opaque value that can be divided by some number and passed to Set
+// (see Set documentation for more information).
+func (t *timerType) Top() uint32 {
+	return t.top
+}
+
+//export __tinygo_pwm_configure
+func pwmConfigure(instance int32, frequency float64, top uint32)
+
+//export __tinygo_pwm_channel_configure
+func pwmChannelConfigure(instance, channel int32, pin Pin)
+
+//export __tinygo_pwm_channel_set
+func pwmChannelSet(instance int32, channel uint8, value uint32)
+
 type SPI struct {
 	Bus uint8
 }
@@ -60,13 +159,13 @@ type SPIConfig struct {
 	Mode      uint8
 }
 
-func (spi SPI) Configure(config SPIConfig) error {
+func (spi *SPI) Configure(config SPIConfig) error {
 	spiConfigure(spi.Bus, config.SCK, config.SDO, config.SDI)
 	return nil
 }
 
 // Transfer writes/reads a single byte using the SPI interface.
-func (spi SPI) Transfer(w byte) (byte, error) {
+func (spi *SPI) Transfer(w byte) (byte, error) {
 	return spiTransfer(spi.Bus, w), nil
 }
 
@@ -87,7 +186,7 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 // This form sends zeros, putting the result into the rx buffer. Good for reading a "result packet":
 //
 //	spi.Tx(nil, rx)
-func (spi SPI) Tx(w, r []byte) error {
+func (spi *SPI) Tx(w, r []byte) error {
 	var wptr, rptr *byte
 	var wlen, rlen int
 	if len(w) != 0 {
@@ -130,7 +229,9 @@ func adcRead(pin Pin) uint16
 
 // I2C is a generic implementation of the Inter-IC communication protocol.
 type I2C struct {
-	Bus uint8
+	Bus     uint8
+	PinsSCL []Pin
+	PinsSDA []Pin
 }
 
 // I2CConfig is used to store config info for I2C.
@@ -142,7 +243,21 @@ type I2CConfig struct {
 
 // Configure is intended to setup the I2C interface.
 func (i2c *I2C) Configure(config I2CConfig) error {
-	i2cConfigure(i2c.Bus, config.SCL, config.SDA)
+	if i2c.PinsSCL != nil {
+		matchSCL := slices.Index(i2c.PinsSCL, config.SCL) >= 0
+		matchSDA := slices.Index(i2c.PinsSDA, config.SDA) >= 0
+		if !matchSCL && !matchSDA {
+			return errors.New("i2c: SCL and SDA pins are incorrect for this I2C instance")
+		} else if !matchSCL {
+			return errors.New("i2c: SCL pin is incorrect for this I2C instance")
+		} else if !matchSDA {
+			return errors.New("i2c: SDA pin is incorrect for this I2C instance")
+		}
+	}
+	if config.Frequency == 0 {
+		config.Frequency = 100 * KHz
+	}
+	i2cConfigure(i2c.Bus, config.SCL, config.SDA, config.Frequency)
 	return nil
 }
 
@@ -164,19 +279,29 @@ func (i2c *I2C) Tx(addr uint16, w, r []byte) error {
 		rptr = &r[0]
 		rlen = len(r)
 	}
-	i2cTransfer(i2c.Bus, wptr, wlen, rptr, rlen)
-	// TODO: do something with the returned error code.
-	return nil
+	errCode := i2cTransfer(i2c.Bus, addr, wptr, wlen, rptr, rlen)
+	switch errCode {
+	case 0:
+		return nil
+	case 1:
+		return errI2CNoDevices
+	case 2:
+		return errI2CMultipleDevices
+	case 3:
+		return errI2CWrongAddress
+	default:
+		return errI2CBusError // unknown error code
+	}
 }
 
 //export __tinygo_i2c_configure
-func i2cConfigure(bus uint8, scl Pin, sda Pin)
+func i2cConfigure(bus uint8, scl Pin, sda Pin, frequency uint32)
 
 //export __tinygo_i2c_set_baud_rate
 func i2cSetBaudRate(bus uint8, br uint32)
 
 //export __tinygo_i2c_transfer
-func i2cTransfer(bus uint8, w *byte, wlen int, r *byte, rlen int) int
+func i2cTransfer(bus uint8, addr uint16, w *byte, wlen int, r *byte, rlen int) int
 
 type UART struct {
 	Bus uint8
@@ -239,23 +364,14 @@ var (
 	sercomUSART4 = UART{4}
 	sercomUSART5 = UART{5}
 
-	sercomI2CM0 = &I2C{0}
-	sercomI2CM1 = &I2C{1}
-	sercomI2CM2 = &I2C{2}
-	sercomI2CM3 = &I2C{3}
-	sercomI2CM4 = &I2C{4}
-	sercomI2CM5 = &I2C{5}
-	sercomI2CM6 = &I2C{6}
-	sercomI2CM7 = &I2C{7}
-
-	sercomSPIM0 = SPI{0}
-	sercomSPIM1 = SPI{1}
-	sercomSPIM2 = SPI{2}
-	sercomSPIM3 = SPI{3}
-	sercomSPIM4 = SPI{4}
-	sercomSPIM5 = SPI{5}
-	sercomSPIM6 = SPI{6}
-	sercomSPIM7 = SPI{7}
+	sercomSPIM0 = &SPI{0}
+	sercomSPIM1 = &SPI{1}
+	sercomSPIM2 = &SPI{2}
+	sercomSPIM3 = &SPI{3}
+	sercomSPIM4 = &SPI{4}
+	sercomSPIM5 = &SPI{5}
+	sercomSPIM6 = &SPI{6}
+	sercomSPIM7 = &SPI{7}
 )
 
 // GetRNG returns 32 bits of random data from the WASI random source.

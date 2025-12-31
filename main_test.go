@@ -15,7 +15,6 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +24,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/tetratelabs/wazero/sys"
 	"github.com/tinygo-org/tinygo/builder"
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/diagnostics"
@@ -34,6 +34,8 @@ import (
 const TESTDATA = "testdata"
 
 var testTarget = flag.String("target", "", "override test target")
+
+var testOnlyCurrentOS = flag.Bool("only-current-os", false, "")
 
 var supportedLinuxArches = map[string]string{
 	"AMD64Linux": "linux/amd64",
@@ -158,20 +160,51 @@ func TestBuild(t *testing.T) {
 		return
 	}
 
-	t.Run("EmulatedCortexM3", func(t *testing.T) {
-		t.Parallel()
-		runPlatTests(optionsFromTarget("cortex-m-qemu", sema), tests, t)
-	})
+	if !*testOnlyCurrentOS {
+		t.Run("EmulatedCortexM3", func(t *testing.T) {
+			t.Parallel()
+			runPlatTests(optionsFromTarget("cortex-m-qemu", sema), tests, t)
+		})
 
-	t.Run("EmulatedRISCV", func(t *testing.T) {
-		t.Parallel()
-		runPlatTests(optionsFromTarget("riscv-qemu", sema), tests, t)
-	})
+		t.Run("EmulatedRISCV", func(t *testing.T) {
+			t.Parallel()
+			runPlatTests(optionsFromTarget("riscv-qemu", sema), tests, t)
+		})
 
-	t.Run("AVR", func(t *testing.T) {
-		t.Parallel()
-		runPlatTests(optionsFromTarget("simavr", sema), tests, t)
-	})
+		t.Run("AVR", func(t *testing.T) {
+			t.Parallel()
+			runPlatTests(optionsFromTarget("simavr", sema), tests, t)
+		})
+
+		t.Run("WebAssembly", func(t *testing.T) {
+			t.Parallel()
+
+			runPlatTests(optionsFromTarget("wasm", sema), tests, t)
+			// Test with -gc=boehm.
+			t.Run("gc.go-boehm", func(t *testing.T) {
+				t.Parallel()
+				optionsBoehm := optionsFromTarget("wasm", sema)
+				optionsBoehm.GC = "boehm"
+				runTest("gc.go", optionsBoehm, t, nil, nil)
+			})
+		})
+		t.Run("WASIp1", func(t *testing.T) {
+			t.Parallel()
+			runPlatTests(optionsFromTarget("wasip1", sema), tests, t)
+
+			// Test with -gc=boehm.
+			t.Run("gc.go-boehm", func(t *testing.T) {
+				t.Parallel()
+				optionsBoehm := optionsFromTarget("wasip1", sema)
+				optionsBoehm.GC = "boehm"
+				runTest("gc.go", optionsBoehm, t, nil, nil)
+			})
+		})
+		t.Run("WASIp2", func(t *testing.T) {
+			t.Parallel()
+			runPlatTests(optionsFromTarget("wasip2", sema), tests, t)
+		})
+	}
 
 	if runtime.GOOS == "linux" {
 		for name, osArch := range supportedLinuxArches {
@@ -191,18 +224,13 @@ func TestBuild(t *testing.T) {
 			options := optionsFromOSARCH("linux/mipsle/softfloat", sema)
 			runTest("cgo/", options, t, nil, nil)
 		})
-		t.Run("WebAssembly", func(t *testing.T) {
-			t.Parallel()
-			runPlatTests(optionsFromTarget("wasm", sema), tests, t)
-		})
-		t.Run("WASI", func(t *testing.T) {
-			t.Parallel()
-			runPlatTests(optionsFromTarget("wasip1", sema), tests, t)
-		})
-		t.Run("WASIp2", func(t *testing.T) {
-			t.Parallel()
-			runPlatTests(optionsFromTarget("wasip2", sema), tests, t)
-		})
+	} else if runtime.GOOS == "windows" {
+		if runtime.GOARCH != "386" {
+			t.Run("Windows386", func(t *testing.T) {
+				t.Parallel()
+				runPlatTests(optionsFromOSARCH("windows/386", sema), tests, t)
+			})
+		}
 	}
 }
 
@@ -396,10 +424,12 @@ func optionsFromOSARCH(osarch string, sema chan struct{}) compileopts.Options {
 }
 
 func runTest(name string, options compileopts.Options, t *testing.T, cmdArgs, environmentVars []string) {
+	t.Helper()
 	runTestWithConfig(name, t, options, cmdArgs, environmentVars)
 }
 
 func runTestWithConfig(name string, t *testing.T, options compileopts.Options, cmdArgs, environmentVars []string) {
+	t.Helper()
 	// Get the expected output for this test.
 	// Note: not using filepath.Join as it strips the path separator at the end
 	// of the path.
@@ -428,6 +458,9 @@ func runTestWithConfig(name string, t *testing.T, options compileopts.Options, c
 		diagnostics.CreateDiagnostics(err).WriteTo(w, "")
 		for _, line := range strings.Split(strings.TrimRight(w.String(), "\n"), "\n") {
 			t.Log(line)
+		}
+		if stdout.Len() != 0 {
+			t.Logf("output:\n%s", stdout.String())
 		}
 		t.Fail()
 		return
@@ -517,12 +550,26 @@ func TestWebAssembly(t *testing.T) {
 						}
 					}
 				}
-				if !slices.Equal(imports, tc.imports) {
+				if !stringSlicesEqual(imports, tc.imports) {
 					t.Errorf("import list not as expected!\nexpected: %v\nactual:   %v", tc.imports, imports)
 				}
 			}
 		})
 	}
+}
+
+func stringSlicesEqual(s1, s2 []string) bool {
+	// We can use slices.Equal once we drop support for Go 1.20 (it was added in
+	// Go 1.21).
+	if len(s1) != len(s2) {
+		return false
+	}
+	for i, s := range s1 {
+		if s != s2[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestWasmExport(t *testing.T) {
@@ -575,6 +622,15 @@ func TestWasmExport(t *testing.T) {
 			buildMode: "default",
 			file:      "wasmexport-noscheduler.go",
 			noOutput:  true, // wasm-unknown cannot produce output
+			command:   true,
+		},
+		// Test buildmode=wasi-legacy with WASI.
+		{
+			name:      "WASIp1-legacy",
+			target:    "wasip1",
+			buildMode: "wasi-legacy",
+			scheduler: "none",
+			file:      "wasmexport-noscheduler.go",
 			command:   true,
 		},
 	}
@@ -649,6 +705,10 @@ func TestWasmExport(t *testing.T) {
 				// again.
 				checkResult("reentrantCall(2, 3)", mustCall(mod.ExportedFunction("reentrantCall").Call(ctx, 2, 3)), []uint64{5})
 				checkResult("reentrantCall(1, 8)", mustCall(mod.ExportedFunction("reentrantCall").Call(ctx, 1, 8)), []uint64{9})
+
+				// Check that goroutines started inside //go:wasmexport don't
+				// block the called function from returning.
+				checkResult("goroutineExit()", mustCall(mod.ExportedFunction("goroutineExit").Call(ctx)), nil)
 			}
 
 			// Add wasip1 module.
@@ -683,7 +743,14 @@ func TestWasmExport(t *testing.T) {
 			if tc.command {
 				// Call _start (the entry point), which calls
 				// tester.callTestMain, which then runs all the tests.
-				mustCall(mod.ExportedFunction("_start").Call(ctx))
+				_, err := mod.ExportedFunction("_start").Call(ctx)
+				if err != nil {
+					if exitErr, ok := err.(*sys.ExitError); ok && exitErr.ExitCode() == 0 {
+						// Exited with code 0. Nothing to worry about.
+					} else {
+						t.Error("failed to run _start:", err)
+					}
+				}
 			} else {
 				// Run the _initialize call, because this is reactor mode wasm.
 				mustCall(mod.ExportedFunction("_initialize").Call(ctx))
@@ -728,6 +795,7 @@ func TestWasmFuncOf(t *testing.T) {
 
 // Test //go:wasmexport in JavaScript (using NodeJS).
 func TestWasmExportJS(t *testing.T) {
+	t.Parallel()
 	type testCase struct {
 		name      string
 		buildMode string
@@ -738,7 +806,9 @@ func TestWasmExportJS(t *testing.T) {
 		{name: "c-shared", buildMode: "c-shared"},
 	}
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			// Build the wasm binary.
 			tmpdir := t.TempDir()
 			options := optionsFromTarget("wasm", sema)
@@ -766,12 +836,58 @@ func TestWasmExportJS(t *testing.T) {
 	}
 }
 
+// Test whether Go.run() (in wasm_exec.js) normally returns and returns the
+// right exit code.
+func TestWasmExit(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name   string
+		output string
+	}
+
+	tests := []testCase{
+		{name: "normal", output: "exit code: 0\n"},
+		{name: "exit-0", output: "exit code: 0\n"},
+		{name: "exit-0-sleep", output: "slept\nexit code: 0\n"},
+		{name: "exit-1", output: "exit code: 1\n"},
+		{name: "exit-1-sleep", output: "slept\nexit code: 1\n"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			options := optionsFromTarget("wasm", sema)
+			buildConfig, err := builder.NewConfig(&options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildConfig.Target.Emulator = "node testdata/wasmexit.js {}"
+			output := &bytes.Buffer{}
+			_, err = buildAndRun("testdata/wasmexit.go", buildConfig, output, []string{tc.name}, nil, time.Minute, func(cmd *exec.Cmd, result builder.BuildResult) error {
+				return cmd.Run()
+			})
+			if err != nil {
+				t.Error(err)
+			}
+			expected := "wasmexit test: " + tc.name + "\n" + tc.output
+			checkOutputData(t, []byte(expected), output.Bytes())
+		})
+	}
+}
+
 // Check whether the output of a test equals the expected output.
 func checkOutput(t *testing.T, filename string, actual []byte) {
+	t.Helper()
 	expectedOutput, err := os.ReadFile(filename)
 	if err != nil {
 		t.Fatal("could not read output file:", err)
 	}
+	checkOutputData(t, expectedOutput, actual)
+}
+
+func checkOutputData(t *testing.T, expectedOutput, actual []byte) {
+	t.Helper()
 	expectedOutput = bytes.ReplaceAll(expectedOutput, []byte("\r\n"), []byte("\n"))
 	actual = bytes.ReplaceAll(actual, []byte("\r\n"), []byte("\n"))
 

@@ -6,8 +6,6 @@ import (
 	"unsafe"
 )
 
-type timeUnit int64
-
 // libc constructors
 //
 //export __wasm_call_ctors
@@ -89,10 +87,6 @@ func ticks() timeUnit {
 	var nano uint64
 	clock_time_get(0, timePrecisionNanoseconds, &nano)
 	return timeUnit(nano)
-}
-
-func beforeExit() {
-	__stdio_exit()
 }
 
 // Implementations of WASI APIs

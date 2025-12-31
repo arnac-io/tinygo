@@ -28,11 +28,13 @@ func TestClangAttributes(t *testing.T) {
 		"cortex-m4",
 		"cortex-m7",
 		"esp32c3",
+		"esp32s3",
 		"fe310",
 		"gameboy-advance",
 		"k210",
 		"nintendoswitch",
 		"riscv-qemu",
+		"tkey",
 		"wasip1",
 		"wasip2",
 		"wasm",
@@ -66,9 +68,9 @@ func TestClangAttributes(t *testing.T) {
 		{GOOS: "linux", GOARCH: "mipsle", GOMIPS: "softfloat"},
 		{GOOS: "darwin", GOARCH: "amd64"},
 		{GOOS: "darwin", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "386"},
 		{GOOS: "windows", GOARCH: "amd64"},
 		{GOOS: "windows", GOARCH: "arm64"},
-		{GOOS: "wasip1", GOARCH: "wasm"},
 	} {
 		name := "GOOS=" + options.GOOS + ",GOARCH=" + options.GOARCH
 		if options.GOARCH == "arm" {

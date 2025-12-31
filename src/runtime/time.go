@@ -1,5 +1,18 @@
 package runtime
 
+//go:linkname time_runtimeNano time.runtimeNano
+func time_runtimeNano() int64 {
+	// Note: we're ignoring sync groups here (package testing/synctest).
+	// See: https://github.com/golang/go/issues/67434
+	return nanotime()
+}
+
+//go:linkname time_runtimeNow time.runtimeNow
+func time_runtimeNow() (sec int64, nsec int32, mono int64) {
+	// Also ignoring the sync group here, like time_runtimeNano above.
+	return now()
+}
+
 // timerNode is an element in a linked list of timers.
 type timerNode struct {
 	next     *timerNode
@@ -32,4 +45,10 @@ func timerCallback(tn *timerNode, delta int64) {
 		tn.timer.when += tn.timer.period
 		addTimer(tn)
 	}
+}
+
+//go:linkname time_runtimeIsBubbled time.runtimeIsBubbled
+func time_runtimeIsBubbled() bool {
+	// We don't currently support bubbles.
+	return false
 }

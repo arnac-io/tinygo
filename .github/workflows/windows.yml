@@ -14,6 +14,8 @@ concurrency:
 jobs:
   build-windows:
     runs-on: windows-2022
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Configure pagefile
         uses: al-cheb/configure-pagefile-action@v1.4
@@ -21,7 +23,7 @@ jobs:
           minimum-size: 8GB
           maximum-size: 24GB
           disk-root: "C:"
-      - uses: brechtm/setup-scoop@v2
+      - uses: MinoruSekine/setup-scoop@v4
         with:
           scoop_update: 'false'
       - name: Install Dependencies
@@ -29,19 +31,23 @@ jobs:
         run: |
           scoop install ninja binaryen
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
+      - name: Extract TinyGo version
+        id: version
+        shell: bash
+        run: ./.github/workflows/tinygo-extract-version.sh | tee -a "$GITHUB_OUTPUT"
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25.5'
           cache: true
       - name: Restore cached LLVM source
         uses: actions/cache/restore@v4
         id: cache-llvm-source
         with:
-          key: llvm-source-18-windows-v1
+          key: llvm-source-20-windows-v1
           path: |
             llvm-project/clang/lib/Headers
             llvm-project/clang/include
@@ -66,7 +72,7 @@ jobs:
         uses: actions/cache/restore@v4
         id: cache-llvm-build
         with:
-          key: llvm-build-18-windows-v2
+          key: llvm-build-20-windows-v2
           path: llvm-build
       - name: Build LLVM
         if: steps.cache-llvm-build.outputs.cache-hit != 'true'
@@ -85,30 +91,28 @@ jobs:
         with:
           key: ${{ steps.cache-llvm-build.outputs.cache-primary-key }}
           path: llvm-build
-      - name: Cache wasi-libc sysroot
+      - name: Cache Go cache
         uses: actions/cache@v4
-        id: cache-wasi-libc
         with:
-          key: wasi-libc-sysroot-v5
-          path: lib/wasi-libc/sysroot
-      - name: Build wasi-libc
-        if: steps.cache-wasi-libc.outputs.cache-hit != 'true'
-        run: make wasi-libc
+          key: go-cache-windows-v1-${{ hashFiles('go.mod') }}
+          path: |
+            C:/Users/runneradmin/AppData/Local/go-build
+            C:/Users/runneradmin/go/pkg/mod
       - name: Install wasmtime
         run: |
-          scoop install wasmtime@14.0.4
+          scoop install wasmtime@29.0.1
       - name: make gen-device
         run: make -j3 gen-device
       - name: Test TinyGo
         shell: bash
-        run: make test GOTESTFLAGS="-short"
+        run: make test GOTESTFLAGS="-only-current-os"
       - name: Build TinyGo release tarball
         shell: bash
         run: make build/release -j4
       - name: Make release artifact
         shell: bash
         working-directory: build/release
-        run: 7z -tzip a release.zip tinygo
+        run: 7z -tzip a tinygo${{ steps.version.outputs.version }}.windows-amd64.zip tinygo
       - name: Publish release artifact
         # Note: this release artifact is double-zipped, see:
         # https://github.com/actions/upload-artifact/issues/39
@@ -118,8 +122,8 @@ jobs:
         # We're doing the former here, to keep artifact uploads fast.
         uses: actions/upload-artifact@v4
         with:
-          name: windows-amd64-double-zipped
-          path: build/release/release.zip
+          name: windows-amd64-double-zipped-${{ steps.version.outputs.version }}
+          path: build/release/tinygo${{ steps.version.outputs.version }}.windows-amd64.zip
 
   smoke-test-windows:
     runs-on: windows-2022
@@ -131,7 +135,7 @@ jobs:
           minimum-size: 8GB
           maximum-size: 24GB
           disk-root: "C:"
-      - uses: brechtm/setup-scoop@v2
+      - uses: MinoruSekine/setup-scoop@v4
         with:
           scoop_update: 'false'
       - name: Install Dependencies
@@ -139,21 +143,21 @@ jobs:
         run: |
           scoop install binaryen
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25.5'
           cache: true
       - name: Download TinyGo build
         uses: actions/download-artifact@v4
         with:
-          name: windows-amd64-double-zipped
+          name: windows-amd64-double-zipped-${{ needs.build-windows.outputs.version }}
           path: build/
       - name: Unzip TinyGo build
         shell: bash
         working-directory: build
-        run: 7z x release.zip -r
+        run: 7z x tinygo*.windows-amd64.zip -r
       - name: Smoke tests
         shell: bash
         run: make smoketest TINYGO=$(PWD)/build/tinygo/bin/tinygo
@@ -169,21 +173,21 @@ jobs:
           maximum-size: 24GB
           disk-root: "C:"
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25.5'
           cache: true
       - name: Download TinyGo build
         uses: actions/download-artifact@v4
         with:
-          name: windows-amd64-double-zipped
+          name: windows-amd64-double-zipped-${{ needs.build-windows.outputs.version }}
           path: build/
       - name: Unzip TinyGo build
         shell: bash
         working-directory: build
-        run: 7z x release.zip -r
+        run: 7z x tinygo*.windows-amd64.zip -r
       - name: Test stdlib packages
         run: make tinygo-test TINYGO=$(PWD)/build/tinygo/bin/tinygo
 
@@ -197,28 +201,28 @@ jobs:
           minimum-size: 8GB
           maximum-size: 24GB
           disk-root: "C:"
-      - uses: brechtm/setup-scoop@v2
+      - uses: MinoruSekine/setup-scoop@v4
         with:
           scoop_update: 'false'
       - name: Install Dependencies
         shell: bash
         run: |
-          scoop install binaryen && scoop install wasmtime@14.0.4
+          scoop install binaryen && scoop install wasmtime@29.0.1
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25.5'
           cache: true
       - name: Download TinyGo build
         uses: actions/download-artifact@v4
         with:
-          name: windows-amd64-double-zipped
+          name: windows-amd64-double-zipped-${{ needs.build-windows.outputs.version }}
           path: build/
       - name: Unzip TinyGo build
         shell: bash
         working-directory: build
-        run: 7z x release.zip -r
+        run: 7z x tinygo*.windows-amd64.zip -r
       - name: Test stdlib packages on wasip1
         run: make tinygo-test-wasip1-fast TINYGO=$(PWD)/build/tinygo/bin/tinygo

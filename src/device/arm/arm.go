@@ -48,10 +48,10 @@ func Asm(asm string)
 // recognizes template values in the form {name}, like so:
 //
 //	arm.AsmFull(
-//	    "str {value}, {result}",
+//	    "str {value}, [{result}]",
 //	    map[string]interface{}{
-//	        "value":  1
-//	        "result": &dest,
+//	        "value":  1,
+//	        "result": uintptr(unsafe.Pointer(&dest)),
 //	    })
 //
 // You can use {} in the asm string (which expands to a register) to set the
@@ -145,6 +145,11 @@ const (
 	SYST_CALIB_NOREF_Msk = 0x80000000 // Bit mask of NOREF field.
 	SYST_CALIB_NOREF     = 0x80000000 // Bit NOREF.
 )
+
+// ClearPendingIRQ clears the pending status of the interrupt.
+func ClearPendingIRQ(irq uint32) {
+	NVIC.ICPR[irq>>5].Set(1 << (irq & 0x1F))
+}
 
 // Enable the given interrupt number.
 func EnableIRQ(irq uint32) {

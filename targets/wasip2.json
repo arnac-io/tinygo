@@ -1,7 +1,7 @@
 {
 	"llvm-target":   "wasm32-unknown-wasi",
 	"cpu":           "generic",
-	"features":      "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext",
+	"features":      "+bulk-memory,+bulk-memory-opt,+call-indirect-overlong,+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
 	"build-tags":    ["tinygo.wasm", "wasip2"],
 	"buildmode":     "c-shared",
 	"goos":          "linux",
@@ -15,6 +15,8 @@
 	"cflags": [
 		"-mbulk-memory",
 		"-mnontrapping-fptoint",
+		"-mno-multivalue",
+		"-mno-reference-types",
 		"-msign-ext"
 	],
 	"ldflags": [
@@ -25,7 +27,7 @@
 	"extra-files": [
 		"src/runtime/asm_tinygowasm.S"
 	],
-	"emulator": "wasmtime --wasm component-model -Sinherit-network -Sallow-ip-name-lookup --dir={tmpDir}::/tmp {}",
+	"emulator": "wasmtime run --wasm component-model -Sinherit-network -Sallow-ip-name-lookup --dir={tmpDir}::/tmp {}",
 	"wit-package": "{root}/lib/wasi-cli/wit/",
 	"wit-world": "wasi:cli/command"
 }

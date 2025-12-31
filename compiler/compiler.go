@@ -17,6 +17,7 @@ import (
 
 	"github.com/tinygo-org/tinygo/compiler/llvmutil"
 	"github.com/tinygo-org/tinygo/loader"
+	"github.com/tinygo-org/tinygo/src/tinygo"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/types/typeutil"
 	"tinygo.org/x/go-llvm"
@@ -57,6 +58,7 @@ type Config struct {
 	MaxStackAlloc      uint64
 	NeedsStackObjects  bool
 	Debug              bool // Whether to emit debug information in the LLVM module.
+	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
 }
 
@@ -150,10 +152,12 @@ type builder struct {
 	llvmFnType        llvm.Type
 	llvmFn            llvm.Value
 	info              functionInfo
-	locals            map[ssa.Value]llvm.Value            // local variables
-	blockEntries      map[*ssa.BasicBlock]llvm.BasicBlock // a *ssa.BasicBlock may be split up
-	blockExits        map[*ssa.BasicBlock]llvm.BasicBlock // these are the exit blocks
+	locals            map[ssa.Value]llvm.Value // local variables
+	blockInfo         []blockInfo
 	currentBlock      *ssa.BasicBlock
+	currentBlockInfo  *blockInfo
+	tarjanStack       []uint
+	tarjanIndex       uint
 	phis              []phiNode
 	deferPtr          llvm.Value
 	deferFrame        llvm.Value
@@ -185,9 +189,20 @@ func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *bu
 		info:            c.getFunctionInfo(f),
 		locals:          make(map[ssa.Value]llvm.Value),
 		dilocals:        make(map[*types.Var]llvm.Metadata),
-		blockEntries:    make(map[*ssa.BasicBlock]llvm.BasicBlock),
-		blockExits:      make(map[*ssa.BasicBlock]llvm.BasicBlock),
 	}
+}
+
+type blockInfo struct {
+	// entry is the LLVM basic block corresponding to the start of this *ssa.Block.
+	entry llvm.BasicBlock
+
+	// exit is the LLVM basic block corresponding to the end of this *ssa.Block.
+	// It will be different than entry if any of the block's instructions contain internal branches.
+	exit llvm.BasicBlock
+
+	// tarjan holds state for applying Tarjan's strongly connected components algorithm to the CFG.
+	// This is used by defer.go to determine whether to stack- or heap-allocate defer data.
+	tarjan tarjanNode
 }
 
 type deferBuiltin struct {
@@ -387,7 +402,7 @@ func (c *compilerContext) getLLVMType(goType types.Type) llvm.Type {
 // makeLLVMType creates a LLVM type for a Go type. Don't call this, use
 // getLLVMType instead.
 func (c *compilerContext) makeLLVMType(goType types.Type) llvm.Type {
-	switch typ := goType.(type) {
+	switch typ := types.Unalias(goType).(type) {
 	case *types.Array:
 		elemType := c.getLLVMType(typ.Elem())
 		return llvm.ArrayType(elemType, int(typ.Len()))
@@ -495,6 +510,21 @@ func (c *compilerContext) createDIType(typ types.Type) llvm.Metadata {
 	llvmType := c.getLLVMType(typ)
 	sizeInBytes := c.targetData.TypeAllocSize(llvmType)
 	switch typ := typ.(type) {
+	case *types.Alias:
+		// Implement types.Alias just like types.Named: by treating them like a
+		// C typedef.
+		temporaryMDNode := c.dibuilder.CreateReplaceableCompositeType(llvm.Metadata{}, llvm.DIReplaceableCompositeType{
+			Tag:         dwarf.TagTypedef,
+			SizeInBits:  sizeInBytes * 8,
+			AlignInBits: uint32(c.targetData.ABITypeAlignment(llvmType)) * 8,
+		})
+		c.ditypes[typ] = temporaryMDNode
+		md := c.dibuilder.CreateTypedef(llvm.DITypedef{
+			Type: c.getDIType(types.Unalias(typ)), // TODO: use typ.Rhs in Go 1.23
+			Name: typ.String(),
+		})
+		temporaryMDNode.ReplaceAllUsesWith(md)
+		return md
 	case *types.Array:
 		return c.dibuilder.CreateArrayType(llvm.DIArrayType{
 			SizeInBits:  sizeInBytes * 8,
@@ -857,6 +887,11 @@ func (c *compilerContext) createPackage(irbuilder llvm.Builder, pkg *ssa.Package
 				// Interfaces don't have concrete methods.
 				continue
 			}
+			if _, isalias := member.Type().(*types.Alias); isalias {
+				// Aliases don't need to be redefined, since they just refer to
+				// an already existing type whose methods will be defined.
+				continue
+			}
 
 			// Named type. We should make sure all methods are created.
 			// This includes both functions with pointer receivers and those
@@ -1198,14 +1233,29 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		// intrinsic (like an atomic operation). Create the entry block
 		// manually.
 		entryBlock = b.ctx.AddBasicBlock(b.llvmFn, "entry")
-	} else {
-		for _, block := range b.fn.DomPreorder() {
-			llvmBlock := b.ctx.AddBasicBlock(b.llvmFn, block.Comment)
-			b.blockEntries[block] = llvmBlock
-			b.blockExits[block] = llvmBlock
+		// Intrinsics may create internal branches (e.g. nil checks).
+		// They will attempt to access b.currentBlockInfo to update the exit block.
+		// Create some fake block info for them to access.
+		blockInfo := []blockInfo{
+			{
+				entry: entryBlock,
+				exit:  entryBlock,
+			},
 		}
+		b.blockInfo = blockInfo
+		b.currentBlockInfo = &blockInfo[0]
+	} else {
+		blocks := b.fn.Blocks
+		blockInfo := make([]blockInfo, len(blocks))
+		for _, block := range b.fn.DomPreorder() {
+			info := &blockInfo[block.Index]
+			llvmBlock := b.ctx.AddBasicBlock(b.llvmFn, block.Comment)
+			info.entry = llvmBlock
+			info.exit = llvmBlock
+		}
+		b.blockInfo = blockInfo
 		// Normal functions have an entry block.
-		entryBlock = b.blockEntries[b.fn.Blocks[0]]
+		entryBlock = blockInfo[0].entry
 	}
 	b.SetInsertPointAtEnd(entryBlock)
 
@@ -1301,8 +1351,9 @@ func (b *builder) createFunction() {
 		if b.DumpSSA {
 			fmt.Printf("%d: %s:\n", block.Index, block.Comment)
 		}
-		b.SetInsertPointAtEnd(b.blockEntries[block])
 		b.currentBlock = block
+		b.currentBlockInfo = &b.blockInfo[block.Index]
+		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
 		for _, instr := range block.Instrs {
 			if instr, ok := instr.(*ssa.DebugRef); ok {
 				if !b.Debug {
@@ -1362,7 +1413,7 @@ func (b *builder) createFunction() {
 		block := phi.ssa.Block()
 		for i, edge := range phi.ssa.Edges {
 			llvmVal := b.getValue(edge, getPos(phi.ssa))
-			llvmBlock := b.blockExits[block.Preds[i]]
+			llvmBlock := b.blockInfo[block.Preds[i].Index].exit
 			phi.llvm.AddIncoming([]llvm.Value{llvmVal}, []llvm.BasicBlock{llvmBlock})
 		}
 	}
@@ -1476,11 +1527,11 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.If:
 		cond := b.getValue(instr.Cond, getPos(instr))
 		block := instr.Block()
-		blockThen := b.blockEntries[block.Succs[0]]
-		blockElse := b.blockEntries[block.Succs[1]]
+		blockThen := b.blockInfo[block.Succs[0].Index].entry
+		blockElse := b.blockInfo[block.Succs[1].Index].entry
 		b.CreateCondBr(cond, blockThen, blockElse)
 	case *ssa.Jump:
-		blockJump := b.blockEntries[instr.Block().Succs[0]]
+		blockJump := b.blockInfo[instr.Block().Succs[0].Index].entry
 		b.CreateBr(blockJump)
 	case *ssa.MapUpdate:
 		m := b.getValue(instr.Map, getPos(instr))
@@ -1680,7 +1731,12 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 			result = b.CreateSelect(cmp, result, arg, "")
 		}
 		return result, nil
+	case "panic":
+		// This is rare, but happens in "defer panic()".
+		b.createRuntimeInvoke("_panic", argValues, "")
+		return llvm.Value{}, nil
 	case "print", "println":
+		b.createRuntimeCall("printlock", nil, "")
 		for i, value := range argValues {
 			if i >= 1 && callName == "println" {
 				b.createRuntimeCall("printspace", nil, "")
@@ -1741,6 +1797,7 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		if callName == "println" {
 			b.createRuntimeCall("printnl", nil, "")
 		}
+		b.createRuntimeCall("printunlock", nil, "")
 		return llvm.Value{}, nil // print() or println() returns void
 	case "real":
 		cplx := argValues[0]
@@ -1828,15 +1885,7 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 //
 // This is also where compiler intrinsics are implemented.
 func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) {
-	var params []llvm.Value
-	for _, param := range instr.Args {
-		params = append(params, b.getValue(param, getPos(instr)))
-	}
-
-	// Try to call the function directly for trivially static calls.
-	var callee, context llvm.Value
-	var calleeType llvm.Type
-	exported := false
+	// See if this is an intrinsic function that is handled specially.
 	if fn := instr.StaticCallee(); fn != nil {
 		// Direct function call, either to a named or anonymous (directly
 		// applied) function call. If it is anonymous, it may be a closure.
@@ -1865,21 +1914,36 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			}
 			return llvm.ConstInt(b.ctx.Int1Type(), supportsRecover, false), nil
 		case name == "runtime.panicStrategy":
-			// These constants are defined in src/runtime/panic.go.
 			panicStrategy := map[string]uint64{
-				"print": 1, // panicStrategyPrint
-				"trap":  2, // panicStrategyTrap
+				"print": tinygo.PanicStrategyPrint,
+				"trap":  tinygo.PanicStrategyTrap,
 			}[b.Config.PanicStrategy]
 			return llvm.ConstInt(b.ctx.Int8Type(), panicStrategy, false), nil
 		case name == "runtime/interrupt.New":
 			return b.createInterruptGlobal(instr)
+		case name == "runtime.exportedFuncPtr":
+			_, ptr := b.getFunction(instr.Args[0].(*ssa.Function))
+			return b.CreatePtrToInt(ptr, b.uintptrType, ""), nil
+		case name == "(*runtime/interrupt.Checkpoint).Save":
+			return b.createInterruptCheckpoint(instr.Args[0]), nil
 		case name == "internal/abi.FuncPCABI0":
 			retval := b.createDarwinFuncPCABI0Call(instr)
 			if !retval.IsNil() {
 				return retval, nil
 			}
 		}
+	}
 
+	var params []llvm.Value
+	for _, param := range instr.Args {
+		params = append(params, b.getValue(param, getPos(instr)))
+	}
+
+	// Try to call the function directly for trivially static calls.
+	var callee, context llvm.Value
+	var calleeType llvm.Type
+	exported := false
+	if fn := instr.StaticCallee(); fn != nil {
 		calleeType, callee = b.getFunction(fn)
 		info := b.getFunctionInfo(fn)
 		if callee.IsNil() {

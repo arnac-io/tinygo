@@ -10,6 +10,7 @@ package testing
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"io/fs"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +79,9 @@ type common struct {
 	tempDir    string
 	tempDirErr error
 	tempDirSeq int32
+
+	ctx       context.Context
+	cancelCtx context.CancelFunc
 }
 
 type logger struct {
@@ -150,6 +156,7 @@ func fmtDuration(d time.Duration) string {
 // TB is the interface common to T and B.
 type TB interface {
 	Cleanup(func())
+	Context() context.Context
 	Error(args ...interface{})
 	Errorf(format string, args ...interface{})
 	Fail()
@@ -305,6 +312,15 @@ func (c *common) Cleanup(f func()) {
 	c.cleanups = append(c.cleanups, f)
 }
 
+// Context returns a context that is canceled just before
+// Cleanup-registered functions are called.
+//
+// Cleanup functions can wait for any resources
+// that shut down on [context.Context.Done] before the test or benchmark completes.
+func (c *common) Context() context.Context {
+	return c.ctx
+}
+
 // TempDir returns a temporary directory for the test to use.
 // The directory is automatically removed by Cleanup when the test and
 // all its subtests complete.
@@ -390,6 +406,49 @@ func (c *common) Setenv(key, value string) {
 	}
 }
 
+// Chdir calls os.Chdir(dir) and uses Cleanup to restore the current
+// working directory to its original value after the test. On Unix, it
+// also sets PWD environment variable for the duration of the test.
+//
+// Because Chdir affects the whole process, it cannot be used
+// in parallel tests or tests with parallel ancestors.
+func (c *common) Chdir(dir string) {
+	// Note: function copied from the Go 1.24.0 source tree.
+
+	oldwd, err := os.Open(".")
+	if err != nil {
+		c.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		c.Fatal(err)
+	}
+	// On POSIX platforms, PWD represents “an absolute pathname of the
+	// current working directory.” Since we are changing the working
+	// directory, we should also set or update PWD to reflect that.
+	switch runtime.GOOS {
+	case "windows", "plan9":
+		// Windows and Plan 9 do not use the PWD variable.
+	default:
+		if !filepath.IsAbs(dir) {
+			dir, err = os.Getwd()
+			if err != nil {
+				c.Fatal(err)
+			}
+		}
+		c.Setenv("PWD", dir)
+	}
+	c.Cleanup(func() {
+		err := oldwd.Chdir()
+		oldwd.Close()
+		if err != nil {
+			// It's not safe to continue with tests if we can't
+			// get back to the original working directory. Since
+			// we are holding a dirfd, this is highly unlikely.
+			panic("testing.Chdir: " + err.Error())
+		}
+	})
+}
+
 // runCleanup is called at the end of the test.
 func (c *common) runCleanup() {
 	for {
@@ -401,6 +460,9 @@ func (c *common) runCleanup() {
 		}
 		if cleanup == nil {
 			return
+		}
+		if c.cancelCtx != nil {
+			c.cancelCtx()
 		}
 		cleanup()
 	}
@@ -443,12 +505,15 @@ func (t *T) Run(name string, f func(t *T)) bool {
 	}
 
 	// Create a subtest.
+	ctx, cancelCtx := context.WithCancel(context.Background())
 	sub := T{
 		common: common{
-			output: &logger{logToStdout: flagVerbose},
-			name:   testName,
-			parent: &t.common,
-			level:  t.level + 1,
+			output:    &logger{logToStdout: flagVerbose},
+			name:      testName,
+			parent:    &t.common,
+			level:     t.level + 1,
+			ctx:       ctx,
+			cancelCtx: cancelCtx,
 		},
 		context: t.context,
 	}
@@ -561,9 +626,12 @@ func runTests(matchString func(pat, str string) (bool, error), tests []InternalT
 	ok = true
 
 	ctx := newTestContext(newMatcher(matchString, flagRunRegexp, "-test.run", flagSkipRegexp))
+	runCtx, cancelCtx := context.WithCancel(context.Background())
 	t := &T{
 		common: common{
-			output: &logger{logToStdout: flagVerbose},
+			output:    &logger{logToStdout: flagVerbose},
+			ctx:       runCtx,
+			cancelCtx: cancelCtx,
 		},
 		context: ctx,
 	}

@@ -1,4 +1,4 @@
-//go:build nrf || nrf51 || nrf52 || nrf528xx || stm32f4 || stm32l4 || stm32wlx || atsamd21 || atsamd51 || atsame5x || rp2040
+//go:build nrf || nrf51 || nrf52 || nrf528xx || stm32f4 || stm32l4 || stm32wlx || atsamd21 || atsamd51 || atsame5x || rp2040 || rp2350
 
 package machine
 
@@ -43,6 +43,11 @@ type BlockDevice interface {
 	io.ReaderAt
 
 	// WriteAt writes the given number of bytes to the block device.
+	//
+	// This interface directly writes data to the underlying block device.
+	// Different kinds of devices have different requirements: most can only
+	// write data after the page has been erased, and many can only write data
+	// with specific alignment (such as 4-byte alignment).
 	io.WriterAt
 
 	// Size returns the number of bytes in this block device.
@@ -63,4 +68,15 @@ type BlockDevice interface {
 	// supports this. The start and len parameters are in block numbers, use
 	// EraseBlockSize to map addresses to blocks.
 	EraseBlocks(start, len int64) error
+}
+
+// pad data if needed so it is long enough for correct byte alignment on writes.
+func flashPad(p []byte, writeBlockSize int) []byte {
+	overflow := len(p) % writeBlockSize
+	if overflow != 0 {
+		for i := 0; i < writeBlockSize-overflow; i++ {
+			p = append(p, 0xff)
+		}
+	}
+	return p
 }

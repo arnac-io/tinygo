@@ -2,41 +2,79 @@ package sync
 
 import (
 	"internal/task"
-	_ "unsafe"
-
-	"runtime/volatile"
 )
 
-type Mutex struct {
-	state   uint8 // Set to non-zero if locked.
-	blocked task.Stack
+type Mutex = task.Mutex
+
+//go:linkname runtimePanic runtime.runtimePanic
+func runtimePanic(msg string)
+
+type RWMutex struct {
+	// Reader count, with the number of readers that currently have read-locked
+	// this mutex.
+	// The value can be in two states: one where 0 means no readers and another
+	// where -rwMutexMaxReaders means no readers. A base of 0 is normal
+	// uncontended operation, a base of -rwMutexMaxReaders means a writer has
+	// the lock or is trying to get the lock. In the second case, readers should
+	// wait until the reader count becomes non-negative again to give the writer
+	// a chance to obtain the lock.
+	readers task.Futex
+
+	// Writer futex, normally 0. If there is a writer waiting until all readers
+	// have unlocked, this value is 1. It will be changed to a 2 (and get a
+	// wake) when the last reader unlocks.
+	writer task.Futex
+
+	// Writer lock. Held between Lock() and Unlock().
+	writerLock Mutex
 }
 
-//go:linkname scheduleTask runtime.runqueuePushBack
-func scheduleTask(*task.Task)
+const rwMutexMaxReaders = 1 << 30
 
-func (m *Mutex) Lock() {
-	if m.islocked() {
-		// Push self onto stack of blocked tasks, and wait to be resumed.
-		m.blocked.Push(task.Current())
-		task.Pause()
+// Lock locks rw for writing.
+// If the lock is already locked for reading or writing,
+// Lock blocks until the lock is available.
+func (rw *RWMutex) Lock() {
+	// Exclusive lock for writers.
+	rw.writerLock.Lock()
+
+	// Flag that we need to be awakened after the last read-lock unlocks.
+	rw.writer.Store(1)
+
+	// Signal to readers that they can't lock this mutex anymore.
+	n := uint32(rwMutexMaxReaders)
+	waiting := rw.readers.Add(-n)
+	if int32(waiting) == -rwMutexMaxReaders {
+		// All readers were already unlocked, so we don't need to wait for them.
+		rw.writer.Store(0)
 		return
 	}
 
-	m.setlock(true)
+	// There is at least one reader.
+	// Wait until all readers are unlocked. The last reader to unlock will set
+	// rw.writer to 2 and awaken us.
+	for rw.writer.Load() == 1 {
+		rw.writer.Wait(1)
+	}
+	rw.writer.Store(0)
 }
 
-func (m *Mutex) Unlock() {
-	if !m.islocked() {
-		panic("sync: unlock of unlocked Mutex")
+// Unlock unlocks rw for writing. It is a run-time error if rw is
+// not locked for writing on entry to Unlock.
+//
+// As with Mutexes, a locked [RWMutex] is not associated with a particular
+// goroutine. One goroutine may [RWMutex.RLock] ([RWMutex.Lock]) a RWMutex and then
+// arrange for another goroutine to [RWMutex.RUnlock] ([RWMutex.Unlock]) it.
+func (rw *RWMutex) Unlock() {
+	// Signal that new readers can lock this mutex.
+	waiting := rw.readers.Add(rwMutexMaxReaders)
+	if waiting != 0 {
+		// Awaken all waiting readers.
+		rw.readers.WakeAll()
 	}
 
-	// Wake up a blocked task, if applicable.
-	if t := m.blocked.Pop(); t != nil {
-		scheduleTask(t)
-	} else {
-		m.setlock(false)
-	}
+	// Done with this lock (next writer can try to get a lock).
+	rw.writerLock.Unlock()
 }
 
 // TryLock tries to lock m and reports whether it succeeded.
@@ -44,154 +82,77 @@ func (m *Mutex) Unlock() {
 // Note that while correct uses of TryLock do exist, they are rare,
 // and use of TryLock is often a sign of a deeper problem
 // in a particular use of mutexes.
-func (m *Mutex) TryLock() bool {
-	if m.islocked() {
+func (rw *RWMutex) TryLock() bool {
+	// Check for active writers
+	if !rw.writerLock.TryLock() {
 		return false
 	}
-	m.Lock()
+	// Have write lock, now check for active readers
+	n := uint32(rwMutexMaxReaders)
+	if !rw.readers.CompareAndSwap(0, -n) {
+		// Active readers, give up write lock
+		rw.writerLock.Unlock()
+		return false
+	}
 	return true
 }
 
-func (m *Mutex) islocked() bool {
-	return volatile.LoadUint8(&m.state) != 0
-}
-
-func (m *Mutex) setlock(b bool) {
-	volatile.StoreUint8(&m.state, boolToU8(b))
-}
-
-func boolToU8(b bool) uint8 {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-type RWMutex struct {
-	// waitingWriters are all of the tasks waiting for write locks.
-	waitingWriters task.Stack
-
-	// waitingReaders are all of the tasks waiting for a read lock.
-	waitingReaders task.Stack
-
-	// state is the current state of the RWMutex.
-	// Iff the mutex is completely unlocked, it contains rwMutexStateUnlocked (aka 0).
-	// Iff the mutex is write-locked, it contains rwMutexStateWLocked.
-	// While the mutex is read-locked, it contains the current number of readers.
-	state uint32
-}
-
-const (
-	rwMutexStateUnlocked = uint32(0)
-	rwMutexStateWLocked  = ^uint32(0)
-	rwMutexMaxReaders    = rwMutexStateWLocked - 1
-)
-
-func (rw *RWMutex) Lock() {
-	if rw.state == 0 {
-		// The mutex is completely unlocked.
-		// Lock without waiting.
-		rw.state = rwMutexStateWLocked
-		return
-	}
-
-	// Wait for the lock to be released.
-	rw.waitingWriters.Push(task.Current())
-	task.Pause()
-}
-
-func (rw *RWMutex) Unlock() {
-	switch rw.state {
-	case rwMutexStateWLocked:
-		// This is correct.
-
-	case rwMutexStateUnlocked:
-		// The mutex is already unlocked.
-		panic("sync: unlock of unlocked RWMutex")
-
-	default:
-		// The mutex is read-locked instead of write-locked.
-		panic("sync: write-unlock of read-locked RWMutex")
-	}
-
-	switch {
-	case rw.maybeUnblockReaders():
-		// Switched over to read mode.
-
-	case rw.maybeUnblockWriter():
-		// Transferred to another writer.
-
-	default:
-		// Nothing is waiting for the lock.
-		rw.state = rwMutexStateUnlocked
-	}
-}
-
+// RLock locks rw for reading.
+//
+// It should not be used for recursive read locking; a blocked Lock
+// call excludes new readers from acquiring the lock. See the
+// documentation on the [RWMutex] type.
 func (rw *RWMutex) RLock() {
-	if rw.state == rwMutexStateWLocked {
-		// Wait for the write lock to be released.
-		rw.waitingReaders.Push(task.Current())
-		task.Pause()
-		return
-	}
+	// Add us as a reader.
+	newVal := rw.readers.Add(1)
 
-	if rw.state == rwMutexMaxReaders {
-		panic("sync: too many readers on RWMutex")
+	// Wait until the RWMutex is available for readers.
+	for int32(newVal) <= 0 {
+		rw.readers.Wait(newVal)
+		newVal = rw.readers.Load()
 	}
-
-	// Increase the reader count.
-	rw.state++
 }
 
+// RUnlock undoes a single [RWMutex.RLock] call;
+// it does not affect other simultaneous readers.
+// It is a run-time error if rw is not locked for reading
+// on entry to RUnlock.
 func (rw *RWMutex) RUnlock() {
-	switch rw.state {
-	case rwMutexStateUnlocked:
-		// The mutex is already unlocked.
-		panic("sync: unlock of unlocked RWMutex")
+	// Remove us as a reader.
+	one := uint32(1)
+	readers := int32(rw.readers.Add(-one))
 
-	case rwMutexStateWLocked:
-		// The mutex is write-locked instead of read-locked.
-		panic("sync: read-unlock of write-locked RWMutex")
+	// Check whether RUnlock was called too often.
+	if readers == -1 || readers == (-rwMutexMaxReaders)-1 {
+		runtimePanic("sync: RUnlock of unlocked RWMutex")
 	}
 
-	rw.state--
-
-	if rw.state == rwMutexStateUnlocked {
-		// This was the last reader.
-		// Try to unblock a writer.
-		rw.maybeUnblockWriter()
-	}
-}
-
-func (rw *RWMutex) maybeUnblockReaders() bool {
-	var n uint32
-	for {
-		t := rw.waitingReaders.Pop()
-		if t == nil {
-			break
+	if readers == -rwMutexMaxReaders {
+		// This was the last read lock. Check whether we need to wake up a write
+		// lock.
+		if rw.writer.CompareAndSwap(1, 2) {
+			rw.writer.Wake()
 		}
-
-		n++
-		scheduleTask(t)
 	}
-	if n == 0 {
-		return false
-	}
-
-	rw.state = n
-	return true
 }
 
-func (rw *RWMutex) maybeUnblockWriter() bool {
-	t := rw.waitingWriters.Pop()
-	if t == nil {
-		return false
+// TryRLock tries to lock rw for reading and reports whether it succeeded.
+//
+// Note that while correct uses of TryRLock do exist, they are rare,
+// and use of TryRLock is often a sign of a deeper problem
+// in a particular use of mutexes.
+func (rw *RWMutex) TryRLock() bool {
+	for {
+		c := rw.readers.Load()
+		if c < 0 {
+			// There is a writer waiting or writing.
+			return false
+		}
+		if rw.readers.CompareAndSwap(c, c+1) {
+			// Read lock obtained.
+			return true
+		}
 	}
-
-	rw.state = rwMutexStateWLocked
-	scheduleTask(t)
-
-	return true
 }
 
 type Locker interface {

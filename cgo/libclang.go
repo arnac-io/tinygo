@@ -63,10 +63,24 @@ long long tinygo_clang_getEnumConstantDeclValue(GoCXCursor c);
 CXType tinygo_clang_getEnumDeclIntegerType(GoCXCursor c);
 unsigned tinygo_clang_Cursor_isAnonymous(GoCXCursor c);
 unsigned tinygo_clang_Cursor_isBitField(GoCXCursor c);
+unsigned tinygo_clang_Cursor_isMacroFunctionLike(GoCXCursor c);
 
+// Fix some warnings on Windows ARM. Without the __declspec(dllexport), it gives warnings like this:
+//     In file included from _cgo_export.c:4:
+//     cgo-gcc-export-header-prolog:49:34: warning: redeclaration of 'tinygo_clang_globals_visitor' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+//     libclang.go:68:5: note: previous declaration is here
+// See: https://github.com/golang/go/issues/49721
+#if defined(_WIN32)
+#define CGO_DECL __declspec(dllexport)
+#else
+#define CGO_DECL
+#endif
+
+CGO_DECL
 int tinygo_clang_globals_visitor(GoCXCursor c, GoCXCursor parent, CXClientData client_data);
+CGO_DECL
 int tinygo_clang_struct_visitor(GoCXCursor c, GoCXCursor parent, CXClientData client_data);
-int tinygo_clang_enum_visitor(GoCXCursor c, GoCXCursor parent, CXClientData client_data);
+CGO_DECL
 void tinygo_clang_inclusion_visitor(CXFile included_file, CXSourceLocation *inclusion_stack, unsigned include_len, CXClientData client_data);
 */
 import "C"
@@ -205,7 +219,7 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		numArgs := int(C.tinygo_clang_Cursor_getNumArguments(c))
 		obj := &ast.Object{
 			Kind: ast.Fun,
-			Name: "C." + name,
+			Name: "_Cgo_" + name,
 		}
 		exportName := name
 		localName := name
@@ -243,7 +257,7 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 			},
 			Name: &ast.Ident{
 				NamePos: pos,
-				Name:    "C." + localName,
+				Name:    "_Cgo_" + localName,
 				Obj:     obj,
 			},
 			Type: &ast.FuncType{
@@ -255,10 +269,18 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 				},
 			},
 		}
+		var doc []string
 		if C.clang_isFunctionTypeVariadic(cursorType) != 0 {
+			doc = append(doc, "//go:variadic")
+		}
+		if _, ok := f.noescapingFuncs[name]; ok {
+			doc = append(doc, "//go:noescape")
+			f.noescapingFuncs[name].used = true
+		}
+		if len(doc) != 0 {
 			decl.Doc.List = append(decl.Doc.List, &ast.Comment{
 				Slash: pos - 1,
-				Text:  "//go:variadic",
+				Text:  strings.Join(doc, "\n"),
 			})
 		}
 		for i := 0; i < numArgs; i++ {
@@ -297,7 +319,7 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		return decl, stringSignature
 	case C.CXCursor_StructDecl, C.CXCursor_UnionDecl:
 		typ := f.makeASTRecordType(c, pos)
-		typeName := "C." + name
+		typeName := "_Cgo_" + name
 		typeExpr := typ.typeExpr
 		if typ.unionSize != 0 {
 			// Convert to a single-field struct type.
@@ -318,7 +340,7 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		obj.Decl = typeSpec
 		return typeSpec, typ
 	case C.CXCursor_TypedefDecl:
-		typeName := "C." + name
+		typeName := "_Cgo_" + name
 		underlyingType := C.tinygo_clang_getTypedefDeclUnderlyingType(c)
 		obj := &ast.Object{
 			Kind: ast.Typ,
@@ -356,12 +378,12 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		}
 		obj := &ast.Object{
 			Kind: ast.Var,
-			Name: "C." + name,
+			Name: "_Cgo_" + name,
 		}
 		valueSpec := &ast.ValueSpec{
 			Names: []*ast.Ident{{
 				NamePos: pos,
-				Name:    "C." + name,
+				Name:    "_Cgo_" + name,
 				Obj:     obj,
 			}},
 			Type: typeExpr,
@@ -370,45 +392,8 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		gen.Specs = append(gen.Specs, valueSpec)
 		return gen, nil
 	case C.CXCursor_MacroDefinition:
-		// Extract tokens from the Clang tokenizer.
-		// See: https://stackoverflow.com/a/19074846/559350
-		sourceRange := C.tinygo_clang_getCursorExtent(c)
-		tu := C.tinygo_clang_Cursor_getTranslationUnit(c)
-		var rawTokens *C.CXToken
-		var numTokens C.unsigned
-		C.clang_tokenize(tu, sourceRange, &rawTokens, &numTokens)
-		tokens := unsafe.Slice(rawTokens, numTokens)
-		// Convert this range of tokens back to source text.
-		// Ugly, but it works well enough.
-		sourceBuf := &bytes.Buffer{}
-		var startOffset int
-		for i, token := range tokens {
-			spelling := getString(C.clang_getTokenSpelling(tu, token))
-			location := C.clang_getTokenLocation(tu, token)
-			var tokenOffset C.unsigned
-			C.clang_getExpansionLocation(location, nil, nil, nil, &tokenOffset)
-			if i == 0 {
-				// The first token is the macro name itself.
-				// Skip it (after using its location).
-				startOffset = int(tokenOffset) + len(name)
-			} else {
-				// Later tokens are the macro contents.
-				for int(tokenOffset) > (startOffset + sourceBuf.Len()) {
-					// Pad the source text with whitespace (that must have been
-					// present in the original source as well).
-					sourceBuf.WriteByte(' ')
-				}
-				sourceBuf.WriteString(spelling)
-			}
-		}
-		C.clang_disposeTokens(tu, rawTokens, numTokens)
-		value := sourceBuf.String()
-		// Try to convert this #define into a Go constant expression.
-		tokenPos := token.NoPos
-		if pos != token.NoPos {
-			tokenPos = pos + token.Pos(len(name))
-		}
-		expr, scannerError := parseConst(tokenPos, f.fset, value)
+		tokenPos, value := f.getMacro(c)
+		expr, scannerError := parseConst(tokenPos, f.fset, value, nil, token.NoPos, f)
 		if scannerError != nil {
 			f.errors = append(f.errors, *scannerError)
 			return nil, nil
@@ -422,12 +407,12 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		}
 		obj := &ast.Object{
 			Kind: ast.Con,
-			Name: "C." + name,
+			Name: "_Cgo_" + name,
 		}
 		valueSpec := &ast.ValueSpec{
 			Names: []*ast.Ident{{
 				NamePos: pos,
-				Name:    "C." + name,
+				Name:    "_Cgo_" + name,
 				Obj:     obj,
 			}},
 			Values: []ast.Expr{expr},
@@ -438,7 +423,7 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 	case C.CXCursor_EnumDecl:
 		obj := &ast.Object{
 			Kind: ast.Typ,
-			Name: "C." + name,
+			Name: "_Cgo_" + name,
 		}
 		underlying := C.tinygo_clang_getEnumDeclIntegerType(c)
 		// TODO: gc's CGo implementation uses types such as `uint32` for enums
@@ -446,7 +431,7 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		typeSpec := &ast.TypeSpec{
 			Name: &ast.Ident{
 				NamePos: pos,
-				Name:    "C." + name,
+				Name:    "_Cgo_" + name,
 				Obj:     obj,
 			},
 			Assign: pos,
@@ -469,12 +454,12 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		}
 		obj := &ast.Object{
 			Kind: ast.Con,
-			Name: "C." + name,
+			Name: "_Cgo_" + name,
 		}
 		valueSpec := &ast.ValueSpec{
 			Names: []*ast.Ident{{
 				NamePos: pos,
-				Name:    "C." + name,
+				Name:    "_Cgo_" + name,
 				Obj:     obj,
 			}},
 			Values: []ast.Expr{expr},
@@ -486,6 +471,62 @@ func (f *cgoFile) createASTNode(name string, c clangCursor) (ast.Node, any) {
 		f.addError(pos, fmt.Sprintf("internal error: unknown cursor type: %d", kind))
 		return nil, nil
 	}
+}
+
+// Return whether this is a macro that's also function-like, like this:
+//
+//	#define add(a, b) (a+b)
+func (f *cgoFile) isFunctionLikeMacro(c clangCursor) bool {
+	if C.tinygo_clang_getCursorKind(c) != C.CXCursor_MacroDefinition {
+		return false
+	}
+	return C.tinygo_clang_Cursor_isMacroFunctionLike(c) != 0
+}
+
+// Get the macro value: the position in the source file and the string value of
+// the macro.
+func (f *cgoFile) getMacro(c clangCursor) (pos token.Pos, value string) {
+	// Extract tokens from the Clang tokenizer.
+	// See: https://stackoverflow.com/a/19074846/559350
+	sourceRange := C.tinygo_clang_getCursorExtent(c)
+	tu := C.tinygo_clang_Cursor_getTranslationUnit(c)
+	var rawTokens *C.CXToken
+	var numTokens C.unsigned
+	C.clang_tokenize(tu, sourceRange, &rawTokens, &numTokens)
+	tokens := unsafe.Slice(rawTokens, numTokens)
+	defer C.clang_disposeTokens(tu, rawTokens, numTokens)
+
+	// Convert this range of tokens back to source text.
+	// Ugly, but it works well enough.
+	sourceBuf := &bytes.Buffer{}
+	var startOffset int
+	for i, token := range tokens {
+		spelling := getString(C.clang_getTokenSpelling(tu, token))
+		location := C.clang_getTokenLocation(tu, token)
+		var tokenOffset C.unsigned
+		C.clang_getExpansionLocation(location, nil, nil, nil, &tokenOffset)
+		if i == 0 {
+			// The first token is the macro name itself.
+			// Skip it (after using its location).
+			startOffset = int(tokenOffset)
+		} else {
+			// Later tokens are the macro contents.
+			for int(tokenOffset) > (startOffset + sourceBuf.Len()) {
+				// Pad the source text with whitespace (that must have been
+				// present in the original source as well).
+				sourceBuf.WriteByte(' ')
+			}
+			sourceBuf.WriteString(spelling)
+		}
+	}
+	value = sourceBuf.String()
+
+	// Obtain the position of this token. This is the position of the first
+	// character in the 'value' string and is used to report errors at the
+	// correct location in the source file.
+	pos = f.getCursorPosition(c)
+
+	return
 }
 
 func getString(clangString C.CXString) (s string) {
@@ -704,27 +745,27 @@ func (f *cgoFile) makeASTType(typ C.CXType, pos token.Pos) ast.Expr {
 	var typeName string
 	switch typ.kind {
 	case C.CXType_Char_S, C.CXType_Char_U:
-		typeName = "C.char"
+		typeName = "_Cgo_char"
 	case C.CXType_SChar:
-		typeName = "C.schar"
+		typeName = "_Cgo_schar"
 	case C.CXType_UChar:
-		typeName = "C.uchar"
+		typeName = "_Cgo_uchar"
 	case C.CXType_Short:
-		typeName = "C.short"
+		typeName = "_Cgo_short"
 	case C.CXType_UShort:
-		typeName = "C.ushort"
+		typeName = "_Cgo_ushort"
 	case C.CXType_Int:
-		typeName = "C.int"
+		typeName = "_Cgo_int"
 	case C.CXType_UInt:
-		typeName = "C.uint"
+		typeName = "_Cgo_uint"
 	case C.CXType_Long:
-		typeName = "C.long"
+		typeName = "_Cgo_long"
 	case C.CXType_ULong:
-		typeName = "C.ulong"
+		typeName = "_Cgo_ulong"
 	case C.CXType_LongLong:
-		typeName = "C.longlong"
+		typeName = "_Cgo_longlong"
 	case C.CXType_ULongLong:
-		typeName = "C.ulonglong"
+		typeName = "_Cgo_ulonglong"
 	case C.CXType_Bool:
 		typeName = "bool"
 	case C.CXType_Float, C.CXType_Double, C.CXType_LongDouble:
@@ -855,7 +896,7 @@ func (f *cgoFile) makeASTType(typ C.CXType, pos token.Pos) ast.Expr {
 		typeSpelling := getString(C.clang_getTypeSpelling(typ))
 		typeKindSpelling := getString(C.clang_getTypeKindSpelling(typ.kind))
 		f.addError(pos, fmt.Sprintf("unknown C type: %v (libclang type kind %s)", typeSpelling, typeKindSpelling))
-		typeName = "C.<unknown>"
+		typeName = "_Cgo_<unknown>"
 	}
 	return &ast.Ident{
 		NamePos: pos,
@@ -872,7 +913,7 @@ func (p *cgoPackage) getIntegerType(name string, cursor clangCursor) *ast.TypeSp
 	var goName string
 	typeSize := C.clang_Type_getSizeOf(underlyingType)
 	switch name {
-	case "C.char":
+	case "_Cgo_char":
 		if typeSize != 1 {
 			// This happens for some very special purpose architectures
 			// (DSPs etc.) that are not currently targeted.
@@ -885,7 +926,7 @@ func (p *cgoPackage) getIntegerType(name string, cursor clangCursor) *ast.TypeSp
 		case C.CXType_Char_U:
 			goName = "uint8"
 		}
-	case "C.schar", "C.short", "C.int", "C.long", "C.longlong":
+	case "_Cgo_schar", "_Cgo_short", "_Cgo_int", "_Cgo_long", "_Cgo_longlong":
 		switch typeSize {
 		case 1:
 			goName = "int8"
@@ -896,7 +937,7 @@ func (p *cgoPackage) getIntegerType(name string, cursor clangCursor) *ast.TypeSp
 		case 8:
 			goName = "int64"
 		}
-	case "C.uchar", "C.ushort", "C.uint", "C.ulong", "C.ulonglong":
+	case "_Cgo_uchar", "_Cgo_ushort", "_Cgo_uint", "_Cgo_ulong", "_Cgo_ulonglong":
 		switch typeSize {
 		case 1:
 			goName = "uint8"

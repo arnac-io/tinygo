@@ -16,6 +16,8 @@ import (
 )
 
 // This symbol name is known by the compiler, see monitor.go.
+//
+//go:linkname rttSerialInstance _SEGGER_RTT
 var rttSerialInstance rttSerial
 
 var Serial = &rttSerialInstance
@@ -123,6 +125,12 @@ func (b *rttBuffer) buffered() int {
 	return int((writeOffset - readOffset) % rttBufferSizeDown)
 }
 
+// Write a single byte to the RTT output buffer.
+//
+// This method is set to not be inlined, to avoid blowing up binary size as a
+// result of inlining writeByte everywhere a println exists.
+//
+//go:noinline
 func (s *rttSerial) WriteByte(b byte) error {
 	s.buffersUp[0].writeByte(b)
 	return nil

@@ -34,6 +34,7 @@ var libPicolibc = Library{
 			"-D__OBSOLETE_MATH_FLOAT=1", // use old math code that doesn't expect a FPU
 			"-D__OBSOLETE_MATH_DOUBLE=0",
 			"-D_WANT_IO_C99_FORMATS",
+			"-D__PICOLIBC_ERRNO_FUNCTION=__errno_location",
 			"-nostdlibinc",
 			"-isystem", newlibDir + "/libc/include",
 			"-I" + newlibDir + "/libc/tinystdio",
@@ -42,7 +43,7 @@ var libPicolibc = Library{
 		}
 	},
 	sourceDir: func() string { return filepath.Join(goenv.Get("TINYGOROOT"), "lib/picolibc/newlib") },
-	librarySources: func(target string) ([]string, error) {
+	librarySources: func(target string, _ bool) ([]string, error) {
 		sources := append([]string(nil), picolibcSources...)
 		if !strings.HasPrefix(target, "avr") {
 			// Small chips without long jumps can't compile many files (printf,

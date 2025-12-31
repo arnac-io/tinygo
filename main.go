@@ -138,27 +138,13 @@ func printCommand(cmd string, args ...string) {
 }
 
 // Build compiles and links the given package and writes it to outpath.
-func Build(pkgName, outpath string, options *compileopts.Options) error {
-	config, err := builder.NewConfig(options)
-	if err != nil {
-		return err
-	}
-
-	if options.PrintJSON {
-		b, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			handleCompilerError(err)
-		}
-		fmt.Printf("%s\n", string(b))
-		return nil
-	}
-
+func Build(pkgName, outpath string, config *compileopts.Config) error {
 	// Create a temporary directory for intermediary files.
 	tmpdir, err := os.MkdirTemp("", "tinygo")
 	if err != nil {
 		return err
 	}
-	if !options.Work {
+	if !config.Options.Work {
 		defer os.RemoveAll(tmpdir)
 	}
 
@@ -305,7 +291,8 @@ func Test(pkgName string, stdout, stderr io.Writer, options *compileopts.Options
 	})
 
 	if testConfig.CompileOnly {
-		return true, nil
+		// Return the compiler error, if there is one.
+		return true, err
 	}
 
 	importPath := strings.TrimSuffix(result.ImportPath, ".test")
@@ -353,8 +340,17 @@ func dirsToModuleRootAbs(maindir, modroot string) []string {
 	return dirs
 }
 
+// validateOutputFormat checks if the output file extension matches the expected format
+func validateOutputFormat(outpath, expectedExt string) error {
+	actualExt := filepath.Ext(outpath)
+	if actualExt != expectedExt {
+		return fmt.Errorf("output format %s does not match target format %s", actualExt, expectedExt)
+	}
+	return nil
+}
+
 // Flash builds and flashes the built binary to the given serial port.
-func Flash(pkgName, port string, options *compileopts.Options) error {
+func Flash(pkgName, port, outpath string, options *compileopts.Options) error {
 	config, err := builder.NewConfig(options)
 	if err != nil {
 		return err
@@ -403,13 +399,24 @@ func Flash(pkgName, port string, options *compileopts.Options) error {
 	if !options.Work {
 		defer os.RemoveAll(tmpdir)
 	}
-
+	// Validate output format before building
+	if outpath != "" {
+		if err := validateOutputFormat(outpath, fileExt); err != nil {
+			return err
+		}
+	}
 	// Build the binary.
 	result, err := builder.Build(pkgName, fileExt, tmpdir, config)
 	if err != nil {
 		return err
 	}
 
+	// Save output file if specified (after build, before flashing)
+	if outpath != "" {
+		if err := copyFile(result.Binary, outpath); err != nil {
+			return fmt.Errorf("failed to save output file: %v", err)
+		}
+	}
 	// do we need port reset to put MCU into bootloader mode?
 	if config.Target.PortReset == "true" && flashMethod != "openocd" {
 		port, err := getDefaultPort(port, config.Target.SerialPort)
@@ -769,9 +776,6 @@ func Run(pkgName string, options *compileopts.Options, cmdArgs []string) error {
 // passes command line arguments and environment variables in a way appropriate
 // for the given emulator.
 func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, cmdArgs, environmentVars []string, timeout time.Duration, run func(cmd *exec.Cmd, result builder.BuildResult) error) (builder.BuildResult, error) {
-
-	isSingleFile := strings.HasSuffix(pkgName, ".go")
-
 	// Determine whether we're on a system that supports environment variables
 	// and command line parameters (operating systems, WASI) or not (baremetal,
 	// WebAssembly in the browser). If we're on a system without an environment,
@@ -784,7 +788,7 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 			needsEnvInVars = true
 		}
 	}
-	var args, emuArgs, env []string
+	var args, env []string
 	var extraCmdEnv []string
 	if needsEnvInVars {
 		runtimeGlobals := make(map[string]string)
@@ -803,20 +807,6 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 			config.Options.GlobalValues = map[string]map[string]string{
 				"runtime": runtimeGlobals,
 			}
-		}
-	} else if config.EmulatorName() == "wasmtime" {
-		for _, v := range environmentVars {
-			emuArgs = append(emuArgs, "--env", v)
-		}
-
-		// Use of '--' argument no longer necessary as of Wasmtime v14:
-		// https://github.com/bytecodealliance/wasmtime/pull/6946
-		// args = append(args, "--")
-		args = append(args, cmdArgs...)
-
-		// Set this for nicer backtraces during tests, but don't override the user.
-		if _, ok := os.LookupEnv("WASMTIME_BACKTRACE_DETAILS"); !ok {
-			extraCmdEnv = append(extraCmdEnv, "WASMTIME_BACKTRACE_DETAILS=1")
 		}
 	} else {
 		// Pass environment variables and command line parameters as usual.
@@ -860,7 +850,7 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 			return result, err
 		}
 
-		name = emulator[0]
+		name, emulator = emulator[0], emulator[1:]
 
 		// wasmtime is a WebAssembly runtime CLI with WASI enabled by default.
 		// By default, only stdio is allowed. For example, while STDOUT routes
@@ -869,11 +859,24 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 		// outside the package directory. Other tests require temporary
 		// writeable directories. We allow this by adding wasmtime flags below.
 		if name == "wasmtime" {
+			var emuArgs []string
+
+			// Extract the wasmtime subcommand (e.g. "run" or "serve")
+			if len(emulator) > 1 {
+				emuArgs = append(emuArgs, emulator[0])
+				emulator = emulator[1:]
+			}
+
+			wd, _ := os.Getwd()
+
 			// Below adds additional wasmtime flags in case a test reads files
 			// outside its directory, like "../testdata/e.txt". This allows any
 			// relative directory up to the module root, even if the test never
 			// reads any files.
 			if config.TestConfig.CompileTestBinary {
+				// Set working directory to package dir
+				wd = result.MainDir
+
 				// Add relative dirs (../, ../..) up to module root (for wasip1)
 				dirs := dirsToModuleRootRel(result.MainDir, result.ModuleRoot)
 
@@ -883,19 +886,25 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 				for _, d := range dirs {
 					emuArgs = append(emuArgs, "--dir="+d)
 				}
+			} else {
+				emuArgs = append(emuArgs, "--dir=.")
 			}
 
-			dir := result.MainDir
-			if isSingleFile {
-				dir, _ = os.Getwd()
+			emuArgs = append(emuArgs, "--dir="+wd)
+			emuArgs = append(emuArgs, "--env=PWD="+wd)
+			for _, v := range environmentVars {
+				emuArgs = append(emuArgs, "--env", v)
 			}
-			emuArgs = append(emuArgs, "--dir=.")
-			emuArgs = append(emuArgs, "--dir="+dir)
-			emuArgs = append(emuArgs, "--env=PWD="+dir)
+
+			// Set this for nicer backtraces during tests, but don't override the user.
+			if _, ok := os.LookupEnv("WASMTIME_BACKTRACE_DETAILS"); !ok {
+				extraCmdEnv = append(extraCmdEnv, "WASMTIME_BACKTRACE_DETAILS=1")
+			}
+
+			emulator = append(emuArgs, emulator...)
 		}
 
-		emuArgs = append(emuArgs, emulator[1:]...)
-		args = append(emuArgs, args...)
+		args = append(emulator, args...)
 	}
 	var cmd *exec.Cmd
 	if ctx != nil {
@@ -925,7 +934,7 @@ func buildAndRun(pkgName string, config *compileopts.Config, stdout io.Writer, c
 
 	// Run binary.
 	if config.Options.PrintCommands != nil {
-		config.Options.PrintCommands(cmd.Path, cmd.Args...)
+		config.Options.PrintCommands(cmd.Path, cmd.Args[1:]...)
 	}
 	err = run(cmd, result)
 	if err != nil {
@@ -1025,15 +1034,50 @@ func findFATMounts(options *compileopts.Options) ([]mountPoint, error) {
 			return nil, fmt.Errorf("could not list mount points: %w", err)
 		}
 		for _, elem := range list {
-			// TODO: find a way to check for the filesystem type.
-			// (Only return FAT filesystems).
-			points = append(points, mountPoint{
-				name: elem.Name(),
-				path: filepath.Join("/Volumes", elem.Name()),
-			})
+			volumePath := filepath.Join("/Volumes", elem.Name())
+			if _, err := os.Stat(volumePath); err != nil {
+				continue
+			}
+
+			cmd := exec.Command("diskutil", "info", volumePath)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			if err := cmd.Run(); err != nil {
+				continue // skip if diskutil failed
+			}
+
+			diskInfo := map[string]string{}
+			scanner := bufio.NewScanner(&out)
+			for scanner.Scan() {
+				line := scanner.Text()
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				diskInfo[key] = value
+			}
+			if err := scanner.Err(); err != nil {
+				continue
+			}
+
+			volName, okv := diskInfo["Volume Name"]
+			fsType, okf := diskInfo["File System Personality"]
+			if !okv || !okf {
+				continue
+			}
+
+			// Check if a filesystem type is FAT-based
+			if strings.Contains(strings.ToUpper(fsType), "FAT") {
+				points = append(points, mountPoint{
+					name: volName,
+					path: volumePath,
+				})
+			}
 		}
 		sort.Slice(points, func(i, j int) bool {
-			return points[i].path < points[j].name
+			return points[i].path < points[j].path
 		})
 		return points, nil
 	case "linux":
@@ -1060,9 +1104,8 @@ func findFATMounts(options *compileopts.Options) ([]mountPoint, error) {
 		return points, nil
 	case "windows":
 		// Obtain a list of all currently mounted volumes.
-		cmd := executeCommand(options, "wmic",
-			"PATH", "Win32_LogicalDisk",
-			"get", "DeviceID,VolumeName,FileSystem,DriveType")
+		cmd := executeCommand(options, "powershell", "-c",
+			"Get-CimInstance -ClassName Win32_LogicalDisk | Select-Object DeviceID, DriveType, FileSystem, VolumeName")
 		var out bytes.Buffer
 		cmd.Stdout = &out
 		err := cmd.Run()
@@ -1275,6 +1318,11 @@ extension at all.`
 			(https://tinygo.org/docs/reference/microcontrollers/).
 			Examples: "arduino-nano", "d1mini", "xiao".
 
+	-o={filename}:
+			Save the built binary to the specified output file. The file
+			format must match the target's expected format (e.g., .hex,
+			.uf2). Both flashing and saving will be performed.
+
 	-monitor: 
 			Start the serial monitor (see below) immediately after
 			flashing. However, some microcontrollers need a split second
@@ -1395,6 +1443,68 @@ func usage(command string) {
 
 }
 
+// Print diagnostics very similar to the -json flag in Go.
+func printBuildOutput(err error, jsonDiagnostics bool) {
+	if err == nil {
+		return // nothing to report
+	}
+
+	if jsonDiagnostics {
+		workingDir, getwdErr := os.Getwd()
+		if getwdErr != nil {
+			workingDir = ""
+		}
+
+		type jsonDiagnosticOutput struct {
+			ImportPath string
+			Action     string
+			Output     string `json:",omitempty"`
+			StartPos   string `json:",omitempty"` // non-standard
+			EndPos     string `json:",omitempty"` // non-standard
+		}
+
+		for _, diags := range diagnostics.CreateDiagnostics(err) {
+			if diags.ImportPath != "" {
+				output, _ := json.Marshal(jsonDiagnosticOutput{
+					ImportPath: diags.ImportPath,
+					Action:     "build-output",
+					Output:     "# " + diags.ImportPath + "\n",
+				})
+				os.Stdout.Write(append(output, '\n'))
+			}
+			for _, diag := range diags.Diagnostics {
+				w := &bytes.Buffer{}
+				diag.WriteTo(w, workingDir)
+				data := jsonDiagnosticOutput{
+					ImportPath: diags.ImportPath,
+					Action:     "build-output",
+					Output:     w.String(),
+				}
+				if diag.StartPos.IsValid() && diag.EndPos.IsValid() {
+					// Include the non-standard StartPos/EndPos values. These
+					// are useful for the TinyGo Playground to show better error
+					// messages.
+					data.StartPos = diagnostics.RelativePosition(diag.StartPos, workingDir).String()
+					data.EndPos = diagnostics.RelativePosition(diag.EndPos, workingDir).String()
+				}
+				output, _ := json.Marshal(data)
+				os.Stdout.Write(append(output, '\n'))
+			}
+
+			// Emit the "Action":"build-fail" JSON.
+			output, _ := json.Marshal(jsonDiagnosticOutput{
+				ImportPath: diags.ImportPath,
+				Action:     "build-fail",
+			})
+			os.Stdout.Write(append(output, '\n'))
+		}
+		os.Exit(1)
+	}
+
+	// Regular diagnostic handling.
+	handleCompilerError(err)
+}
+
 func handleCompilerError(err error) {
 	if err != nil {
 		wd, getwdErr := os.Getwd()
@@ -1491,28 +1601,30 @@ func main() {
 	command := os.Args[1]
 
 	opt := flag.String("opt", "z", "optimization level: 0, 1, 2, s, z")
-	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative)")
+	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, custom, precise, boehm)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
-	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks, asyncify)")
+	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks, cores, threads, asyncify)")
 	serial := flag.String("serial", "", "which serial output to use (none, uart, usb, rtt)")
 	work := flag.Bool("work", false, "print the name of the temporary build directory and do not delete this directory on exit")
 	interpTimeout := flag.Duration("interp-timeout", 180*time.Second, "interp optimization pass timeout")
 	var tags buildutil.TagsFlag
 	flag.Var(&tags, "tags", "a space-separated list of extra build tags")
 	target := flag.String("target", "", "chip/board name or JSON target specification file")
-	buildMode := flag.String("buildmode", "", "build mode to use (default, c-shared)")
+	buildMode := flag.String("buildmode", "", "build mode to use (default, c-shared, wasi-legacy)")
 	var stackSize uint64
 	flag.Func("stack-size", "goroutine stack size (if unknown at compile time)", func(s string) error {
 		size, err := bytesize.Parse(s)
 		stackSize = uint64(size)
 		return err
 	})
-	printSize := flag.String("size", "", "print sizes (none, short, full)")
+	printSize := flag.String("size", "", "print sizes (none, short, full, html)")
 	printStacks := flag.Bool("print-stacks", false, "print stack sizes of goroutines")
 	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which heap allocations should be printed")
 	printCommands := flag.Bool("x", false, "Print commands")
+	flagJSON := flag.Bool("json", false, "print output in JSON format")
 	parallelism := flag.Int("p", runtime.GOMAXPROCS(0), "the number of build jobs that can run in parallel")
 	nodebug := flag.Bool("no-debug", false, "strip debug information")
+	nobounds := flag.Bool("nobounds", false, "do not emit bounds checks")
 	ocdCommandsString := flag.String("ocd-commands", "", "OpenOCD commands, overriding target spec (can specify multiple separated by commas)")
 	ocdOutput := flag.Bool("ocd-output", false, "print OCD daemon output during debug")
 	port := flag.String("port", "", "flash port (can specify multiple candidates separated by commas)")
@@ -1523,6 +1635,7 @@ func main() {
 	cpuprofile := flag.String("cpuprofile", "", "cpuprofile output")
 	monitor := flag.Bool("monitor", false, "enable serial monitor")
 	baudrate := flag.Int("baudrate", 115200, "baudrate of serial monitor")
+	gocompatibility := flag.Bool("go-compatibility", true, "enable to check for Go versions compatibility, you can also configure this by setting the TINYGO_GOCOMPATIBILITY environment variable")
 
 	// Internal flags, that are only intended for TinyGo development.
 	printIR := flag.Bool("internal-printir", false, "print LLVM IR")
@@ -1535,16 +1648,13 @@ func main() {
 	// development it can be useful to not emit debug information at all.
 	skipDwarf := flag.Bool("internal-nodwarf", false, "internal flag, use -no-debug instead")
 
-	var flagJSON, flagDeps, flagTest bool
-	if command == "help" || command == "list" || command == "info" || command == "build" {
-		flag.BoolVar(&flagJSON, "json", false, "print data in JSON format")
-	}
+	var flagDeps, flagTest bool
 	if command == "help" || command == "list" {
 		flag.BoolVar(&flagDeps, "deps", false, "supply -deps flag to go list")
 		flag.BoolVar(&flagTest, "test", false, "supply -test flag to go list")
 	}
 	var outpath string
-	if command == "help" || command == "build" || command == "test" {
+	if command == "help" || command == "build" || command == "test" || command == "flash" {
 		flag.StringVar(&outpath, "o", "", "output filename")
 	}
 
@@ -1603,6 +1713,16 @@ func main() {
 		ocdCommands = strings.Split(*ocdCommandsString, ",")
 	}
 
+	val, ok := os.LookupEnv("TINYGO_GOCOMPATIBILITY")
+	if ok {
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not parse TINYGO_GOCOMPATIBILITY value %q: %v\n", val, err)
+			os.Exit(1)
+		}
+		*gocompatibility = b
+	}
+
 	options := &compileopts.Options{
 		GOOS:            goenv.Get("GOOS"),
 		GOARCH:          goenv.Get("GOARCH"),
@@ -1624,6 +1744,7 @@ func main() {
 		SkipDWARF:       *skipDwarf,
 		Semaphore:       make(chan struct{}, *parallelism),
 		Debug:           !*nodebug,
+		Nobounds:        *nobounds,
 		PrintSizes:      *printSize,
 		PrintStacks:     *printStacks,
 		PrintAllocs:     printAllocs,
@@ -1633,16 +1754,23 @@ func main() {
 		Programmer:      *programmer,
 		OpenOCDCommands: ocdCommands,
 		LLVMFeatures:    *llvmFeatures,
-		PrintJSON:       flagJSON,
 		Monitor:         *monitor,
 		BaudRate:        *baudrate,
 		Timeout:         *timeout,
 		WITPackage:      witPackage,
 		WITWorld:        witWorld,
-		ExtLDFlags:      extLDFlags,
+		GoCompatibility: *gocompatibility,
 	}
 	if *printCommands {
 		options.PrintCommands = printCommand
+	}
+
+	if extLDFlags != "" {
+		options.ExtLDFlags, err = shlex.Split(extLDFlags)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "could not parse -extldflags:", err)
+			os.Exit(1)
+		}
 	}
 
 	err = options.Verify()
@@ -1676,17 +1804,20 @@ func main() {
 			usage(command)
 			os.Exit(1)
 		}
-		if options.Target == "" && filepath.Ext(outpath) == ".wasm" {
-			options.Target = "wasm"
+		if filepath.Ext(outpath) == ".wasm" && options.GOARCH != "wasm" && options.Target == "" {
+			fmt.Fprintln(os.Stderr, "you appear to want to build a wasm file, but have not specified either a target flag, or the GOARCH/GOOS to use.")
+			os.Exit(1)
 		}
 
-		err := Build(pkgName, outpath, options)
+		config, err := builder.NewConfig(options)
 		handleCompilerError(err)
+		err = Build(pkgName, outpath, config)
+		printBuildOutput(err, *flagJSON)
 	case "flash", "gdb", "lldb":
 		pkgName := filepath.ToSlash(flag.Arg(0))
 		if command == "flash" {
-			err := Flash(pkgName, *port, options)
-			handleCompilerError(err)
+			err := Flash(pkgName, *port, outpath, options)
+			printBuildOutput(err, *flagJSON)
 		} else {
 			if !options.Debug {
 				fmt.Fprintln(os.Stderr, "Debug disabled while running debugger?")
@@ -1694,7 +1825,7 @@ func main() {
 				os.Exit(1)
 			}
 			err := Debug(command, pkgName, *ocdOutput, options)
-			handleCompilerError(err)
+			printBuildOutput(err, *flagJSON)
 		}
 	case "run":
 		if flag.NArg() < 1 {
@@ -1704,7 +1835,7 @@ func main() {
 		}
 		pkgName := filepath.ToSlash(flag.Arg(0))
 		err := Run(pkgName, options, flag.Args()[1:])
-		handleCompilerError(err)
+		printBuildOutput(err, *flagJSON)
 	case "test":
 		var pkgNames []string
 		for i := 0; i < flag.NArg(); i++ {
@@ -1771,6 +1902,7 @@ func main() {
 						wd = ""
 					}
 					diagnostics.CreateDiagnostics(err).WriteTo(os.Stderr, wd)
+					os.Exit(1)
 				}
 				if !passed {
 					select {
@@ -1832,16 +1964,13 @@ func main() {
 			os.Exit(1)
 		}
 		config.GoMinorVersion = 0 // this avoids creating the list of Go1.x build tags.
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+
 		cachedGOROOT, err := loader.GetCachedGoroot(config)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if flagJSON {
+		if *flagJSON {
 			json, _ := json.MarshalIndent(struct {
 				Target     *compileopts.TargetSpec `json:"target"`
 				GOROOT     string                  `json:"goroot"`
@@ -1883,7 +2012,7 @@ func main() {
 			os.Exit(1)
 		}
 		var extraArgs []string
-		if flagJSON {
+		if *flagJSON {
 			extraArgs = append(extraArgs, "-json")
 		}
 		if flagDeps {

@@ -8,13 +8,20 @@ LLVM_PROJECTDIR ?= llvm-project
 CLANG_SRC ?= $(LLVM_PROJECTDIR)/clang
 LLD_SRC ?= $(LLVM_PROJECTDIR)/lld
 
+ifeq ($(OS),Windows_NT)
+    # avoid calling uname on Windows
+    uname := Windows_NT
+else
+    uname := $(shell uname -s)
+endif
+
 # Try to autodetect LLVM build tools.
 # Versions are listed here in descending priority order.
-LLVM_VERSIONS = 18 17 16 15
+LLVM_VERSIONS = 19 18 17 16 15
 errifempty = $(if $(1),$(1),$(error $(2)))
 detect = $(shell which $(call errifempty,$(firstword $(foreach p,$(2),$(shell command -v $(p) 2> /dev/null && echo $(p)))),failed to locate $(1) at any of: $(2)))
 toolSearchPathsVersion = $(1)-$(2)
-ifeq ($(shell uname -s),Darwin)
+ifeq ($(uname),Darwin)
 	# Also explicitly search Brew's copy, which is not in PATH by default.
 	BREW_PREFIX := $(shell brew --prefix)
 	toolSearchPathsVersion += $(BREW_PREFIX)/opt/llvm@$(2)/bin/$(1)-$(2) $(BREW_PREFIX)/opt/llvm@$(2)/bin/$(1)
@@ -27,7 +34,6 @@ LLVM_NM ?= $(call findLLVMTool,llvm-nm)
 
 # Go binary and GOROOT to select
 GO ?= go
-export GOROOT = $(shell $(GO) env GOROOT)
 
 # Flags to pass to go test.
 GOTESTFLAGS ?=
@@ -38,14 +44,10 @@ TINYGO ?= $(call detect,tinygo,tinygo $(CURDIR)/build/tinygo)
 
 # Check for ccache if the user hasn't set it to on or off.
 ifeq (, $(CCACHE))
-    # Use CCACHE for LLVM if possible
-    ifneq (, $(shell command -v ccache 2> /dev/null))
-        CCACHE := ON
-    else
-        CCACHE := OFF
-    endif
+    LLVM_OPTION += '-DLLVM_CCACHE_BUILD=$(if $(shell command -v ccache 2> /dev/null),ON,OFF)'
+else
+    LLVM_OPTION += '-DLLVM_CCACHE_BUILD=$(CCACHE)'
 endif
-LLVM_OPTION += '-DLLVM_CCACHE_BUILD=$(CCACHE)'
 
 # Allow enabling LLVM assertions
 ifeq (1, $(ASSERT))
@@ -75,6 +77,26 @@ ifeq (1, $(STATIC))
     # For details, see:
     # https://github.com/WebAssembly/binaryen/blob/version_102/.github/workflows/ci.yml#L181
     BINARYEN_OPTION += -DCMAKE_CXX_FLAGS="-static" -DCMAKE_C_FLAGS="-static"
+endif
+
+# Optimize the binary size for Linux.
+# These flags may work on other platforms, but have only been tested on Linux.
+ifeq ($(uname),Linux)
+    HAS_MOLD := $(shell command -v ld.mold 2> /dev/null)
+    HAS_LLD := $(shell command -v ld.lld 2> /dev/null)
+    LLVM_CFLAGS := -ffunction-sections -fdata-sections -fvisibility=hidden
+    LLVM_LDFLAGS := -Wl,--gc-sections
+    ifneq ($(HAS_MOLD),)
+        # Mold might be slightly faster.
+        LLVM_LDFLAGS += -fuse-ld=mold -Wl,--icf=all
+    else ifneq ($(HAS_LLD),)
+        # LLD is more commonly available.
+        LLVM_LDFLAGS += -fuse-ld=lld -Wl,--icf=all
+    endif
+    LLVM_OPTION += \
+        -DCMAKE_C_FLAGS="$(LLVM_CFLAGS)" \
+        -DCMAKE_CXX_FLAGS="$(LLVM_CFLAGS)"
+    CGO_LDFLAGS += $(LLVM_LDFLAGS)
 endif
 
 # Cross compiling support.
@@ -127,14 +149,14 @@ ifeq ($(OS),Windows_NT)
 
     USE_SYSTEM_BINARYEN ?= 1
 
-else ifeq ($(shell uname -s),Darwin)
+else ifeq ($(uname),Darwin)
     MD5SUM ?= md5
 
     CGO_LDFLAGS += -lxar
 
     USE_SYSTEM_BINARYEN ?= 1
 
-else ifeq ($(shell uname -s),FreeBSD)
+else ifeq ($(uname),FreeBSD)
     MD5SUM ?= md5
     START_GROUP = -Wl,--start-group
     END_GROUP = -Wl,--end-group
@@ -147,7 +169,7 @@ endif
 MD5SUM ?= md5sum
 
 # Libraries that should be linked in for the statically linked Clang.
-CLANG_LIB_NAMES = clangAnalysis clangAPINotes clangAST clangASTMatchers clangBasic clangCodeGen clangCrossTU clangDriver clangDynamicASTMatchers clangEdit clangExtractAPI clangFormat clangFrontend clangFrontendTool clangHandleCXX clangHandleLLVM clangIndex clangLex clangParse clangRewrite clangRewriteFrontend clangSema clangSerialization clangSupport clangTooling clangToolingASTDiff clangToolingCore clangToolingInclusions
+CLANG_LIB_NAMES = clangAnalysis clangAPINotes clangAST clangASTMatchers clangBasic clangCodeGen clangCrossTU clangDriver clangDynamicASTMatchers clangEdit clangExtractAPI clangFormat clangFrontend clangFrontendTool clangHandleCXX clangHandleLLVM clangIndex clangInstallAPI clangLex clangParse clangRewrite clangRewriteFrontend clangSema clangSerialization clangSupport clangTooling clangToolingASTDiff clangToolingCore clangToolingInclusions
 CLANG_LIBS = $(START_GROUP) $(addprefix -l,$(CLANG_LIB_NAMES)) $(END_GROUP) -lstdc++
 
 # Libraries that should be linked in for the statically linked LLD.
@@ -185,7 +207,10 @@ fmt-check: ## Warn if any source needs reformatting
 	@unformatted=$$(gofmt -l $(FMT_PATHS)); [ -z "$$unformatted" ] && exit 0; echo "Unformatted:"; for fn in $$unformatted; do echo "  $$fn"; done; exit 1
 
 
-gen-device: gen-device-avr gen-device-esp gen-device-nrf gen-device-sam gen-device-sifive gen-device-kendryte gen-device-nxp gen-device-rp gen-device-renesas ## Generate microcontroller-specific sources
+gen-device: gen-device-avr gen-device-esp gen-device-nrf gen-device-sam gen-device-sifive gen-device-kendryte gen-device-nxp gen-device-rp ## Generate microcontroller-specific sources
+ifneq ($(RENESAS), 0)
+gen-device: gen-device-renesas
+endif
 ifneq ($(STM32), 0)
 gen-device: gen-device-stm32
 endif
@@ -238,7 +263,7 @@ gen-device-renesas: build/gen-device-svd
 	GO111MODULE=off $(GO) fmt ./src/device/renesas
 
 $(LLVM_PROJECTDIR)/llvm:
-	git clone -b tinygo_xtensa_release_18.1.2 --depth=1 https://github.com/tinygo-org/llvm-project $(LLVM_PROJECTDIR)
+	git clone -b tinygo_20.x --depth=1 https://github.com/tinygo-org/llvm-project $(LLVM_PROJECTDIR)
 llvm-source: $(LLVM_PROJECTDIR)/llvm ## Get LLVM sources
 
 # Configure LLVM.
@@ -259,40 +284,34 @@ build/wasm-opt$(EXE):
 	cp lib/binaryen/bin/wasm-opt$(EXE) build/wasm-opt$(EXE)
 endif
 
-# Build wasi-libc sysroot
-.PHONY: wasi-libc
-wasi-libc: lib/wasi-libc/sysroot/lib/wasm32-wasi/libc.a
-lib/wasi-libc/sysroot/lib/wasm32-wasi/libc.a:
-	@if [ ! -e lib/wasi-libc/Makefile ]; then echo "Submodules have not been downloaded. Please download them using:\n  git submodule update --init"; exit 1; fi
-	cd lib/wasi-libc && $(MAKE) -j4 EXTRA_CFLAGS="-O2 -g -DNDEBUG -mnontrapping-fptoint -msign-ext" MALLOC_IMPL=none CC="$(CLANG)" AR=$(LLVM_AR) NM=$(LLVM_NM)
-
 # Generate WASI syscall bindings
-WASM_TOOLS_MODULE=github.com/bytecodealliance/wasm-tools-go
+WASM_TOOLS_MODULE=go.bytecodealliance.org
 .PHONY: wasi-syscall
 wasi-syscall: wasi-cm
+	rm -rf ./src/internal/wasi/*
 	go run -modfile ./internal/wasm-tools/go.mod $(WASM_TOOLS_MODULE)/cmd/wit-bindgen-go generate --versioned -o ./src/internal -p internal --cm internal/cm ./lib/wasi-cli/wit
 
 # Copy package cm into src/internal/cm
 .PHONY: wasi-cm
 wasi-cm:
-	# rm -rf ./src/internal/cm
-	rsync -rv --delete --exclude '*_test.go' $(shell go list -modfile ./internal/wasm-tools/go.mod -m -f {{.Dir}} $(WASM_TOOLS_MODULE))/cm ./src/internal/
+	rm -rf ./src/internal/cm/*
+	rsync -rv --delete --exclude go.mod --exclude '*_test.go' --exclude '*_json.go' --exclude '*.md' --exclude LICENSE $(shell go list -modfile ./internal/wasm-tools/go.mod -m -f {{.Dir}} $(WASM_TOOLS_MODULE)/cm)/ ./src/internal/cm
 
 # Check for Node.js used during WASM tests.
-NODEJS_VERSION := $(word 1,$(subst ., ,$(shell node -v | cut -c 2-)))
 MIN_NODEJS_VERSION=18
 
 .PHONY: check-nodejs-version
 check-nodejs-version:
-ifeq (, $(shell which node))
-	@echo "Install NodeJS version 18+ to run tests."; exit 1;
-endif
-	@if [ $(NODEJS_VERSION) -lt $(MIN_NODEJS_VERSION) ]; then echo "Install NodeJS version 18+ to run tests."; exit 1; fi
+	@# Check whether NodeJS is available.
+	@if ! command -v node 2>&1 >/dev/null; then echo "Install NodeJS version ${MIN_NODEJS_VERSION}+ to run tests."; exit 1; fi
+
+	@# Check whether the version is high enough.
+	@if [ "`node -v | sed 's/v\([0-9]\+\).*/\\1/g'`" -lt $(MIN_NODEJS_VERSION) ]; then echo "Install NodeJS version $(MIN_NODEJS_VERSION)+ to run tests."; exit 1; fi
 
 tinygo: ## Build the TinyGo compiler
 	@if [ ! -f "$(LLVM_BUILDDIR)/bin/llvm-config" ]; then echo "Fetch and build LLVM first by running:"; echo "  $(MAKE) llvm-source"; echo "  $(MAKE) $(LLVM_BUILDDIR)"; exit 1; fi
-	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GOENVFLAGS) $(GO) build -buildmode exe -o build/tinygo$(EXE) -tags "byollvm osusergo" -ldflags="-X github.com/tinygo-org/tinygo/goenv.GitSha1=`git rev-parse --short HEAD`" .
-test: wasi-libc check-nodejs-version
+	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GOENVFLAGS) $(GO) build -buildmode exe -o build/tinygo$(EXE) -tags "byollvm osusergo" .
+test: check-nodejs-version
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -timeout=1h -buildmode exe -tags "byollvm osusergo" $(GOTESTPKGS)
 
 # Standard library packages that pass tests on darwin, linux, wasi, and windows, but take over a minute in wasi
@@ -309,11 +328,9 @@ TEST_PACKAGES_FAST = \
 	container/heap \
 	container/list \
 	container/ring \
-	crypto/des \
 	crypto/ecdsa \
 	crypto/elliptic \
 	crypto/md5 \
-	crypto/rc4 \
 	crypto/sha1 \
 	crypto/sha256 \
 	crypto/sha512 \
@@ -355,17 +372,11 @@ TEST_PACKAGES_FAST = \
 	unique \
 	$(nil)
 
-# Assume this will go away before Go2, so only check minor version.
-ifeq ($(filter $(shell $(GO) env GOVERSION | cut -f 2 -d.), 16 17 18), )
-TEST_PACKAGES_FAST += crypto/internal/nistec/fiat
-else
-TEST_PACKAGES_FAST += crypto/elliptic/internal/fiat
-endif
-
 # archive/zip requires os.ReadAt, which is not yet supported on windows
 # bytes requires mmap
 # compress/flate appears to hang on wasi
 # crypto/aes fails on wasi, needs panic()/recover()
+# crypto/des fails on wasi, needs panic()/recover()
 # crypto/hmac fails on wasi, it exits with a "slice out of range" panic
 # debug/plan9obj requires os.ReadAt, which is not yet supported on windows
 # image requires recover(), which is not yet supported on wasi
@@ -386,6 +397,7 @@ TEST_PACKAGES_LINUX := \
 	archive/zip \
 	compress/flate \
 	crypto/aes \
+	crypto/des \
 	crypto/hmac \
 	debug/dwarf \
 	debug/plan9obj \
@@ -405,17 +417,48 @@ TEST_PACKAGES_LINUX := \
 
 TEST_PACKAGES_DARWIN := $(TEST_PACKAGES_LINUX)
 
+# os/user requires t.Skip() support
 TEST_PACKAGES_WINDOWS := \
 	compress/flate \
+	crypto/des \
 	crypto/hmac \
-	os/user \
 	strconv \
 	text/template/parse \
 	$(nil)
 
+
+# These packages cannot be tested on wasm, mostly because these tests assume a
+# working filesystem. This could perhaps be fixed, by supporting filesystem
+# access when running inside Node.js.
+TEST_PACKAGES_WASM = $(filter-out $(TEST_PACKAGES_NONWASM), $(TEST_PACKAGES_FAST))
+TEST_PACKAGES_NONWASM = \
+	compress/lzw \
+	compress/zlib \
+	crypto/ecdsa \
+	debug/macho \
+	embed/internal/embedtest \
+	go/format \
+	os \
+	testing \
+	$(nil)
+
+# These packages cannot be tested on baremetal.
+#
+# Some reasons why the tests don't pass on baremetal:
+#
+#   * No filesystem is available, so packages like compress/zlib can't be tested
+#     (just like wasm).
+#   * picolibc math functions apparently are less precise, the math package
+#     fails on baremetal.
+TEST_PACKAGES_BAREMETAL = $(filter-out $(TEST_PACKAGES_NONBAREMETAL), $(TEST_PACKAGES_FAST))
+TEST_PACKAGES_NONBAREMETAL = \
+	$(TEST_PACKAGES_NONWASM) \
+	math \
+	$(nil)
+
 # Report platforms on which each standard library package is known to pass tests
-jointmp := $(shell echo /tmp/join.$$$$)
 report-stdlib-tests-pass:
+	$(eval jointmp := $(shell echo /tmp/join.$$$$))
 	@for t in $(TEST_PACKAGES_DARWIN); do echo "$$t darwin"; done | sort > $(jointmp).darwin
 	@for t in $(TEST_PACKAGES_LINUX); do echo "$$t linux"; done | sort > $(jointmp).linux
 	@for t in $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW); do echo "$$t darwin linux wasi windows"; done | sort > $(jointmp).portable
@@ -424,11 +467,11 @@ report-stdlib-tests-pass:
 	@rm $(jointmp).*
 
 # Standard library packages that pass tests quickly on the current platform
-ifeq ($(shell uname),Darwin)
+ifeq ($(uname),Darwin)
 TEST_PACKAGES_HOST := $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_DARWIN)
 TEST_IOFS := true
 endif
-ifeq ($(shell uname),Linux)
+ifeq ($(uname),Linux)
 TEST_PACKAGES_HOST := $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_LINUX)
 TEST_IOFS := true
 endif
@@ -437,11 +480,16 @@ TEST_PACKAGES_HOST := $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_WINDOWS)
 TEST_IOFS := false
 endif
 
+TEST_SKIP_FLAG := -skip='TestExtraMethods|TestParseAndBytesRoundTrip/P256/Generic'
+TEST_ADDITIONAL_FLAGS ?=
+
 # Test known-working standard library packages.
 # TODO: parallelize, and only show failing tests (no implied -v flag).
 .PHONY: tinygo-test
 tinygo-test:
-	$(TINYGO) test $(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW)
+	@# TestExtraMethods: used by many crypto packages and uses reflect.Type.Method which is not implemented.
+	@# TestParseAndBytesRoundTrip/P256/Generic: relies on t.Skip() which is not implemented
+	$(TINYGO) test $(TEST_ADDITIONAL_FLAGS) $(TEST_SKIP_FLAG) $(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW)
 	@# io/fs requires os.ReadDir, not yet supported on windows or wasi. It also
 	@# requires a large stack-size. Hence, io/fs is only run conditionally.
 	@# For more details, see the comments on issue #3143.
@@ -449,24 +497,26 @@ ifeq ($(TEST_IOFS),true)
 	$(TINYGO) test -stack-size=6MB io/fs
 endif
 tinygo-test-fast:
-	$(TINYGO) test $(TEST_PACKAGES_HOST)
+	$(TINYGO) test $(TEST_SKIP_FLAG) $(TEST_PACKAGES_HOST)
 tinygo-bench:
 	$(TINYGO) test -bench . $(TEST_PACKAGES_HOST) $(TEST_PACKAGES_SLOW)
 tinygo-bench-fast:
 	$(TINYGO) test -bench . $(TEST_PACKAGES_HOST)
 
 # Same thing, except for wasi rather than the current platform.
+tinygo-test-wasm:
+	$(TINYGO) test -target wasm $(TEST_SKIP_FLAG) $(TEST_PACKAGES_WASM)
 tinygo-test-wasi:
-	$(TINYGO) test -target wasip1 $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi
+	$(TINYGO) test -target wasip1 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi
 tinygo-test-wasip1:
-	GOOS=wasip1 GOARCH=wasm $(TINYGO) test $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi
+	GOOS=wasip1 GOARCH=wasm $(TINYGO) test $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST) $(TEST_PACKAGES_SLOW) ./tests/runtime_wasi
 tinygo-test-wasip1-fast:
-	$(TINYGO) test -target=wasip1 $(TEST_PACKAGES_FAST) ./tests/runtime_wasi
+	$(TINYGO) test -target=wasip1 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST) ./tests/runtime_wasi
 
 tinygo-test-wasip2-slow:
-	$(TINYGO) test -target=wasip2 $(TEST_PACKAGES_SLOW)
+	$(TINYGO) test -target=wasip2 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_SLOW)
 tinygo-test-wasip2-fast:
-	$(TINYGO) test -target=wasip2 $(TEST_PACKAGES_FAST) ./tests/runtime_wasi
+	$(TINYGO) test -target=wasip2 $(TEST_SKIP_FLAG) $(TEST_PACKAGES_FAST) ./tests/runtime_wasi
 
 tinygo-test-wasip2-sum-slow:
 	TINYGO=$(TINYGO) \
@@ -490,18 +540,19 @@ tinygo-bench-wasip2:
 tinygo-bench-wasip2-fast:
 	$(TINYGO) test -target wasip2 -bench . $(TEST_PACKAGES_FAST)
 
+# Run tests on riscv-qemu since that one provides a large amount of memory.
+tinygo-test-baremetal:
+	$(TINYGO) test -target riscv-qemu $(TEST_SKIP_FLAG) $(TEST_PACKAGES_BAREMETAL)
+
 # Test external packages in a large corpus.
 test-corpus:
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -timeout=1h -buildmode exe -tags byollvm -run TestCorpus . -corpus=testdata/corpus.yaml
 test-corpus-fast:
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -timeout=1h -buildmode exe -tags byollvm -run TestCorpus -short . -corpus=testdata/corpus.yaml
-test-corpus-wasi: wasi-libc
+test-corpus-wasi:
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -timeout=1h -buildmode exe -tags byollvm -run TestCorpus . -corpus=testdata/corpus.yaml -target=wasip1
-
-tinygo-baremetal:
-	# Regression tests that run on a baremetal target and don't fit in either main_test.go or smoketest.
-	# regression test for #2666: e.g. encoding/hex must pass on baremetal
-	$(TINYGO) test -target cortex-m-qemu encoding/hex
+test-corpus-wasip2:
+	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -timeout=1h -buildmode exe -tags byollvm -run TestCorpus . -corpus=testdata/corpus.yaml -target=wasip2
 
 .PHONY: testchdir
 testchdir:
@@ -523,6 +574,8 @@ smoketest: testchdir
 	# regression test for #2563
 	cd tests/os/smoke && $(TINYGO) test -c -target=pybadge && rm smoke.test
 	# test all examples (except pwm)
+	$(TINYGO) build -size short -o test.hex -target=pga2350             examples/echo
+	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/blinky1
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=pca10040            examples/adc
@@ -569,23 +622,27 @@ smoketest: testchdir
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=feather-rp2040      examples/device-id
 	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pico2-ice           examples/blinky1
+	@$(MD5SUM) test.hex
 	# test simulated boards on play.tinygo.org
 ifneq ($(WASM), 0)
-	$(TINYGO) build -size short -o test.wasm -tags=arduino              examples/blinky1
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=arduino              examples/blinky1
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=hifive1b             examples/blinky1
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=hifive1b             examples/blinky1
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=reelboard            examples/blinky1
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=reelboard            examples/blinky1
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=microbit             examples/microbit-blink
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=microbit             examples/microbit-blink
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=circuitplay_express  examples/blinky1
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=circuitplay_express  examples/blinky1
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=circuitplay_bluefruit examples/blinky1
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=circuitplay_bluefruit examples/blinky1
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=mch2022              examples/machinetest
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=mch2022              examples/machinetest
 	@$(MD5SUM) test.wasm
-	$(TINYGO) build -size short -o test.wasm -tags=gopher_badge         examples/blinky1
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=gopher_badge         examples/blinky1
+	@$(MD5SUM) test.wasm
+	GOOS=js GOARCH=wasm $(TINYGO) build -size short -o test.wasm -tags=pico                 examples/blinky1
 	@$(MD5SUM) test.wasm
 endif
 	# test all targets/boards
@@ -599,7 +656,11 @@ endif
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=microbit-v2-s113v7  examples/microbit-blink
 	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=microbit-v2-s140v7  examples/microbit-blink
+	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=nrf52840-mdk        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=btt-skr-pico        examples/uart
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=pca10031            examples/blinky1
 	@$(MD5SUM) test.hex
@@ -737,9 +798,21 @@ endif
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=gopher-badge      examples/blinky1
 	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=gopher-arcade      examples/blinky1
+	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=ae-rp2040           examples/echo
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=thumby              examples/echo
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pico2               examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=tiny2350            examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pico-plus2          examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=metro-rp2350        examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=waveshare-rp2040-tiny examples/echo
 	@$(MD5SUM) test.hex
 	# test pwm
 	$(TINYGO) build -size short -o test.hex -target=itsybitsy-m0        examples/pwm
@@ -754,6 +827,10 @@ endif
 	$(TINYGO) build -size short -o test.hex -target=circuitplay-express examples/hid-keyboard
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=feather-nrf52840    examples/usb-midi
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pico    			examples/usb-storage
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=pico2    			examples/usb-storage
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=nrf52840-s140v6-uf2-generic	examples/machinetest
 	@$(MD5SUM) test.hex
@@ -794,6 +871,8 @@ ifneq ($(STM32), 0)
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=mksnanov3           examples/blinky1
 	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=stm32l0x1           examples/serial
+	@$(MD5SUM) test.hex
 endif
 	$(TINYGO) build -size short -o test.hex -target=atmega328pb         examples/blinkm
 	@$(MD5SUM) test.hex
@@ -822,6 +901,8 @@ endif
 ifneq ($(XTENSA), 0)
 	$(TINYGO) build -size short -o test.bin -target=esp32-mini32      	examples/blinky1
 	@$(MD5SUM) test.bin
+	$(TINYGO) build -size short -o test.bin -target=esp32c3-supermini   examples/blinky1
+	@$(MD5SUM) test.bin
 	$(TINYGO) build -size short -o test.bin -target=nodemcu             examples/blinky1
 	@$(MD5SUM) test.bin
 	$(TINYGO) build -size short -o test.bin -target m5stack-core2       examples/machinetest
@@ -833,6 +914,8 @@ ifneq ($(XTENSA), 0)
 	$(TINYGO) build -size short -o test.bin -target m5paper             examples/machinetest
 	@$(MD5SUM) test.bin
 	$(TINYGO) build -size short -o test.bin -target mch2022             examples/machinetest
+	@$(MD5SUM) test.bin
+	$(TINYGO) build -size short -o test.bin -target=xiao-esp32s3   		examples/blinky1
 	@$(MD5SUM) test.bin
 endif
 	$(TINYGO) build -size short -o test.bin -target=esp-c3-32s-kit      examples/blinky1
@@ -853,6 +936,16 @@ endif
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=maixbit             examples/blinky1
 	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=tkey                examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=elecrow-rp2040      examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=elecrow-rp2350      examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=hw-651              examples/machinetest
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=hw-651-s110v8       examples/machinetest
+	@$(MD5SUM) test.hex
 ifneq ($(WASM), 0)
 	$(TINYGO) build -size short -o wasm.wasm -target=wasm               examples/wasm/export
 	$(TINYGO) build -size short -o wasm.wasm -target=wasm               examples/wasm/main
@@ -867,7 +960,7 @@ endif
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=pca10040 -serial=rtt examples/echo
 	@$(MD5SUM) test.hex
-	$(TINYGO) build             -o test.nro -target=nintendoswitch      examples/serial
+	$(TINYGO) build             -o test.nro -target=nintendoswitch      examples/echo2
 	@$(MD5SUM) test.nro
 	$(TINYGO) build -size short -o test.hex -target=pca10040 -opt=0     ./testdata/stdlib.go
 	@$(MD5SUM) test.hex
@@ -885,15 +978,17 @@ endif
 
 
 wasmtest:
-	$(GO) test ./tests/wasm
+	cd ./tests/wasm && $(GO) test .
 
-build/release: tinygo gen-device wasi-libc $(if $(filter 1,$(USE_SYSTEM_BINARYEN)),,binaryen)
+build/release: tinygo gen-device $(if $(filter 1,$(USE_SYSTEM_BINARYEN)),,binaryen)
 	@mkdir -p build/release/tinygo/bin
+	@mkdir -p build/release/tinygo/lib/bdwgc
 	@mkdir -p build/release/tinygo/lib/clang/include
 	@mkdir -p build/release/tinygo/lib/CMSIS/CMSIS
 	@mkdir -p build/release/tinygo/lib/macos-minimal-sdk
+	@mkdir -p build/release/tinygo/lib/mingw-w64/mingw-w64-crt/crt
+	@mkdir -p build/release/tinygo/lib/mingw-w64/mingw-w64-crt/math
 	@mkdir -p build/release/tinygo/lib/mingw-w64/mingw-w64-crt/lib-common
-	@mkdir -p build/release/tinygo/lib/mingw-w64/mingw-w64-crt/stdio
 	@mkdir -p build/release/tinygo/lib/mingw-w64/mingw-w64-headers/defaults
 	@mkdir -p build/release/tinygo/lib/musl/arch
 	@mkdir -p build/release/tinygo/lib/musl/crt
@@ -901,7 +996,8 @@ build/release: tinygo gen-device wasi-libc $(if $(filter 1,$(USE_SYSTEM_BINARYEN
 	@mkdir -p build/release/tinygo/lib/nrfx
 	@mkdir -p build/release/tinygo/lib/picolibc/newlib/libc
 	@mkdir -p build/release/tinygo/lib/picolibc/newlib/libm
-	@mkdir -p build/release/tinygo/lib/wasi-libc/libc-bottom-half/headers
+	@mkdir -p build/release/tinygo/lib/wasi-libc/dlmalloc
+	@mkdir -p build/release/tinygo/lib/wasi-libc/libc-bottom-half
 	@mkdir -p build/release/tinygo/lib/wasi-libc/libc-top-half/musl/arch
 	@mkdir -p build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
 	@mkdir -p build/release/tinygo/lib/wasi-cli/
@@ -910,6 +1006,7 @@ build/release: tinygo gen-device wasi-libc $(if $(filter 1,$(USE_SYSTEM_BINARYEN
 ifneq ($(USE_SYSTEM_BINARYEN),1)
 	@cp -p  build/wasm-opt$(EXE)         build/release/tinygo/bin
 endif
+	@cp -rp lib/bdwgc/*                  build/release/tinygo/lib/bdwgc
 	@cp -p $(abspath $(CLANG_SRC))/lib/Headers/*.h build/release/tinygo/lib/clang/include
 	@cp -rp lib/CMSIS/CMSIS/Include      build/release/tinygo/lib/CMSIS/CMSIS
 	@cp -rp lib/CMSIS/README.md          build/release/tinygo/lib/CMSIS
@@ -923,9 +1020,12 @@ endif
 	@cp -rp lib/musl/crt/crt1.c          build/release/tinygo/lib/musl/crt
 	@cp -rp lib/musl/COPYRIGHT           build/release/tinygo/lib/musl
 	@cp -rp lib/musl/include             build/release/tinygo/lib/musl
+	@cp -rp lib/musl/src/conf            build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/ctype           build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/env             build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/errno           build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/exit            build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/fcntl           build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/include         build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/internal        build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/legacy          build/release/tinygo/lib/musl/src
@@ -934,19 +1034,31 @@ endif
 	@cp -rp lib/musl/src/malloc          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/mman            build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/math            build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/misc            build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/multibyte       build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/sched           build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/signal          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/stdio           build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/stdlib          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/string          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/thread          build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/time            build/release/tinygo/lib/musl/src
 	@cp -rp lib/musl/src/unistd          build/release/tinygo/lib/musl/src
+	@cp -rp lib/musl/src/process         build/release/tinygo/lib/musl/src
+	@cp -rp lib/mingw-w64/mingw-w64-crt/crt/pseudo-reloc.c          build/release/tinygo/lib/mingw-w64/mingw-w64-crt/crt
 	@cp -rp lib/mingw-w64/mingw-w64-crt/def-include                 build/release/tinygo/lib/mingw-w64/mingw-w64-crt
+	@cp -rp lib/mingw-w64/mingw-w64-crt/gdtoa                       build/release/tinygo/lib/mingw-w64/mingw-w64-crt
+	@cp -rp lib/mingw-w64/mingw-w64-crt/include                     build/release/tinygo/lib/mingw-w64/mingw-w64-crt
 	@cp -rp lib/mingw-w64/mingw-w64-crt/lib-common/api-ms-win-crt-* build/release/tinygo/lib/mingw-w64/mingw-w64-crt/lib-common
+	@cp -rp lib/mingw-w64/mingw-w64-crt/lib-common/advapi32.def.in  build/release/tinygo/lib/mingw-w64/mingw-w64-crt/lib-common
 	@cp -rp lib/mingw-w64/mingw-w64-crt/lib-common/kernel32.def.in  build/release/tinygo/lib/mingw-w64/mingw-w64-crt/lib-common
-	@cp -rp lib/mingw-w64/mingw-w64-crt/stdio/ucrt_*                build/release/tinygo/lib/mingw-w64/mingw-w64-crt/stdio
+	@cp -rp lib/mingw-w64/mingw-w64-crt/lib-common/msvcrt.def.in    build/release/tinygo/lib/mingw-w64/mingw-w64-crt/lib-common
+	@cp -rp lib/mingw-w64/mingw-w64-crt/math/x86                    build/release/tinygo/lib/mingw-w64/mingw-w64-crt/math
+	@cp -rp lib/mingw-w64/mingw-w64-crt/misc                        build/release/tinygo/lib/mingw-w64/mingw-w64-crt
+	@cp -rp lib/mingw-w64/mingw-w64-crt/stdio                       build/release/tinygo/lib/mingw-w64/mingw-w64-crt
 	@cp -rp lib/mingw-w64/mingw-w64-headers/crt/                    build/release/tinygo/lib/mingw-w64/mingw-w64-headers
 	@cp -rp lib/mingw-w64/mingw-w64-headers/defaults/include        build/release/tinygo/lib/mingw-w64/mingw-w64-headers/defaults
+	@cp -rp lib/mingw-w64/mingw-w64-headers/include                 build/release/tinygo/lib/mingw-w64/mingw-w64-headers
 	@cp -rp lib/nrfx/*                   build/release/tinygo/lib/nrfx
 	@cp -rp lib/picolibc/newlib/libc/ctype       build/release/tinygo/lib/picolibc/newlib/libc
 	@cp -rp lib/picolibc/newlib/libc/include     build/release/tinygo/lib/picolibc/newlib/libc
@@ -956,15 +1068,37 @@ endif
 	@cp -rp lib/picolibc/newlib/libm/common      build/release/tinygo/lib/picolibc/newlib/libm
 	@cp -rp lib/picolibc/newlib/libm/math        build/release/tinygo/lib/picolibc/newlib/libm
 	@cp -rp lib/picolibc-stdio.c         build/release/tinygo/lib
-	@cp -rp lib/wasi-libc/libc-bottom-half/headers/public           build/release/tinygo/lib/wasi-libc/libc-bottom-half/headers
+	@cp -rp lib/wasi-libc/dlmalloc/src                              build/release/tinygo/lib/wasi-libc/dlmalloc
+	@cp -rp lib/wasi-libc/libc-bottom-half/cloudlibc                build/release/tinygo/lib/wasi-libc/libc-bottom-half
+	@cp -rp lib/wasi-libc/libc-bottom-half/headers                  build/release/tinygo/lib/wasi-libc/libc-bottom-half
+	@cp -rp lib/wasi-libc/libc-bottom-half/sources                  build/release/tinygo/lib/wasi-libc/libc-bottom-half
+	@cp -rp lib/wasi-libc/libc-top-half/headers                     build/release/tinygo/lib/wasi-libc/libc-top-half
 	@cp -rp lib/wasi-libc/libc-top-half/musl/arch/generic           build/release/tinygo/lib/wasi-libc/libc-top-half/musl/arch
 	@cp -rp lib/wasi-libc/libc-top-half/musl/arch/wasm32            build/release/tinygo/lib/wasi-libc/libc-top-half/musl/arch
+	@cp -rp lib/wasi-libc/libc-top-half/musl/include                build/release/tinygo/lib/wasi-libc/libc-top-half/musl
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/conf               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/dirent             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/env                build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/errno              build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/exit               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/fcntl              build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/fenv               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
 	@cp -rp lib/wasi-libc/libc-top-half/musl/src/include            build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
 	@cp -rp lib/wasi-libc/libc-top-half/musl/src/internal           build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/legacy             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/locale             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
 	@cp -rp lib/wasi-libc/libc-top-half/musl/src/math               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/misc               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/multibyte          build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/network            build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/stat               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/stdio              build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/stdlib             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
 	@cp -rp lib/wasi-libc/libc-top-half/musl/src/string             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
-	@cp -rp lib/wasi-libc/libc-top-half/musl/include                build/release/tinygo/lib/wasi-libc/libc-top-half/musl
-	@cp -rp lib/wasi-libc/sysroot                                   build/release/tinygo/lib/wasi-libc/sysroot
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/thread             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/time               build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/musl/src/unistd             build/release/tinygo/lib/wasi-libc/libc-top-half/musl/src
+	@cp -rp lib/wasi-libc/libc-top-half/sources                     build/release/tinygo/lib/wasi-libc/libc-top-half
 	@cp -rp lib/wasi-cli/wit                                        build/release/tinygo/lib/wasi-cli/wit
 	@cp -rp llvm-project/compiler-rt/lib/builtins build/release/tinygo/lib/compiler-rt-builtins
 	@cp -rp llvm-project/compiler-rt/LICENSE.TXT  build/release/tinygo/lib/compiler-rt-builtins
@@ -991,6 +1125,7 @@ endif
 tools:
 	cd internal/tools && go generate -tags tools ./
 
+LINTDIRS=src/os/ src/reflect/
 .PHONY: lint
 lint: tools ## Lint source tree
 	revive -version
@@ -998,7 +1133,10 @@ lint: tools ## Lint source tree
 	# revive.toml isn't flexible enough to filter out just one kind of error from a checker, so do it with grep here.
 	# Can't use grep with friendly formatter.  Plain output isn't too bad, though.
 	# Use 'grep .' to get rid of stray blank line
-	revive -config revive.toml compiler/... src/{os,reflect}/*.go | grep -v "should have comment or be unexported" | grep '.' | awk '{print}; END {exit NR>0}'
+	revive -config revive.toml compiler/... $$( find $(LINTDIRS) -type f -name '*.go' ) \
+		| grep -v "should have comment or be unexported" \
+		| grep '.' \
+		| awk '{print}; END {exit NR>0}'
 
 SPELLDIRSCMD=find . -depth 1 -type d  | egrep -wv '.git|lib|llvm|src'; find src -depth 1 | egrep -wv 'device|internal|net|vendor'; find src/internal -depth 1 -type d | egrep -wv src/internal/wasi
 .PHONY: spell

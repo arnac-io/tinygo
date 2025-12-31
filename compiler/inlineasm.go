@@ -38,10 +38,10 @@ func (b *builder) createInlineAsm(args []ssa.Value) (llvm.Value, error) {
 // provided immediately. For example:
 //
 //	arm.AsmFull(
-//	    "str {value}, {result}",
+//	    "str {value}, [{result}]",
 //	    map[string]interface{}{
-//	        "value":  1
-//	        "result": &dest,
+//	        "value":  1,
+//	        "result": uintptr(unsafe.Pointer(&dest)),
 //	    })
 func (b *builder) createInlineAsmFull(instr *ssa.CallCommon) (llvm.Value, error) {
 	asmString := constant.StringVal(instr.Args[0].(*ssa.Const).Value)
@@ -248,4 +248,16 @@ func (b *builder) emitCSROperation(call *ssa.CallCommon) (llvm.Value, error) {
 	default:
 		return llvm.Value{}, b.makeError(call.Pos(), "unknown CSR operation: "+name)
 	}
+}
+
+// Implement runtime/interrupt.Checkpoint.Save. It needs to be implemented
+// directly at the call site. If it isn't implemented directly at the call site
+// (but instead through a function call), it might result in an overwritten
+// stack in the non-jump return case.
+func (b *builder) createInterruptCheckpoint(ptr ssa.Value) llvm.Value {
+	addr := b.getValue(ptr, ptr.Pos())
+	b.createNilCheck(ptr, addr, "deref")
+	stackPointer := b.readStackPointer()
+	b.CreateStore(stackPointer, addr)
+	return b.createCheckpoint(addr)
 }

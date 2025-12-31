@@ -371,13 +371,6 @@ func (c *compilerContext) getPointerBitmap(typ llvm.Type, pos token.Pos) *big.In
 		return big.NewInt(1)
 	case llvm.StructTypeKind:
 		ptrs := big.NewInt(0)
-		if typ.StructName() == "runtime.funcValue" {
-			// Hack: the type runtime.funcValue contains an 'id' field which is
-			// of type uintptr, but before the LowerFuncValues pass it actually
-			// contains a pointer (ptrtoint) to a global. This trips up the
-			// interp package. Therefore, make the id field a pointer for now.
-			typ = c.ctx.StructType([]llvm.Type{c.dataPtrType, c.dataPtrType}, false)
-		}
 		for i, subtyp := range typ.StructElementTypes() {
 			subptrs := c.getPointerBitmap(subtyp, pos)
 			if subptrs.BitLen() == 0 {
@@ -457,6 +450,21 @@ func (b *builder) readStackPointer() llvm.Value {
 		stacksave = llvm.AddFunction(b.mod, name, fnType)
 	}
 	return b.CreateCall(stacksave.GlobalValueType(), stacksave, nil, "")
+}
+
+// writeStackPointer emits a LLVM intrinsic call that updates the current stack
+// pointer.
+func (b *builder) writeStackPointer(sp llvm.Value) {
+	name := "llvm.stackrestore.p0"
+	if llvmutil.Version() < 18 {
+		name = "llvm.stackrestore" // backwards compatibility with LLVM 17 and below
+	}
+	stackrestore := b.mod.NamedFunction(name)
+	if stackrestore.IsNil() {
+		fnType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.dataPtrType}, false)
+		stackrestore = llvm.AddFunction(b.mod, name, fnType)
+	}
+	b.CreateCall(stackrestore.GlobalValueType(), stackrestore, []llvm.Value{sp}, "")
 }
 
 // createZExtOrTrunc lets the input value fit in the output type bits, by zero

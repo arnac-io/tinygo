@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 func init() {
 	println("called init")
 }
@@ -8,6 +10,10 @@ func init() {
 func callTestMain()
 
 func main() {
+	// Check that exported functions can still be called after calling
+	// time.Sleep.
+	time.Sleep(time.Millisecond)
+
 	// main.main is not used when using -buildmode=c-shared.
 	callTestMain()
 }
@@ -32,4 +38,10 @@ func reentrantCall(a, b int32) int32 {
 	result := callOutside(a, b)
 	println("reentrantCall result:", result)
 	return result
+}
+
+//go:wasmexport goroutineExit
+func goroutineExit() {
+	// Dummy, not a real test (since we have no scheduler).
+	println("goroutineExit: exit")
 }

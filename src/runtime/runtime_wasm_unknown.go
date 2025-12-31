@@ -5,8 +5,6 @@ package runtime
 // TODO: this is essentially reactor mode wasm. So we might want to support
 // -buildmode=c-shared (and default to it).
 
-type timeUnit int64
-
 // libc constructors
 //
 //export __wasm_call_ctors
@@ -24,9 +22,6 @@ func nanosecondsToTicks(ns int64) timeUnit {
 	return timeUnit(ns)
 }
 
-// with the wasm32-unknown-unknown target there is no way to determine any `precision`
-const timePrecisionNanoseconds = 1000
-
 func sleepTicks(d timeUnit) {
 }
 
@@ -34,5 +29,8 @@ func ticks() timeUnit {
 	return timeUnit(0)
 }
 
-func beforeExit() {
+func mainReturnExit() {
+	// Don't exit explicitly here. We can't (there is no environment with an
+	// exit call) but also it's not needed. We can just let _start and main.main
+	// return to the caller.
 }

@@ -46,6 +46,7 @@ type TargetSpec struct {
 	LinkerScript     string   `json:"linkerscript,omitempty"`
 	ExtraFiles       []string `json:"extra-files,omitempty"`
 	RP2040BootPatch  *bool    `json:"rp2040-boot-patch,omitempty"` // Patch RP2040 2nd stage bootloader checksum
+	BootPatches      []string `json:"boot-patches,omitempty"`      // Bootloader patches to be applied in the order they appear.
 	Emulator         string   `json:"emulator,omitempty"`
 	FlashCommand     string   `json:"flash-command,omitempty"`
 	GDB              []string `json:"gdb,omitempty"`
@@ -177,6 +178,21 @@ func (spec *TargetSpec) resolveInherits() error {
 
 // Load a target specification.
 func LoadTarget(options *Options) (*TargetSpec, error) {
+	if options.Target == "" && options.GOARCH == "wasm" {
+		// Set a specific target if we're building from a known GOOS/GOARCH
+		// combination that is defined in a target JSON file.
+		switch options.GOOS {
+		case "js":
+			options.Target = "wasm"
+		case "wasip1":
+			options.Target = "wasip1"
+		case "wasip2":
+			options.Target = "wasip2"
+		default:
+			return nil, errors.New("GOARCH=wasm but GOOS is not set correctly. Please set GOOS to js, wasip1, or wasip2.")
+		}
+	}
+
 	if options.Target == "" {
 		return defaultTarget(options)
 	}
@@ -246,8 +262,6 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		GOOS:             options.GOOS,
 		GOARCH:           options.GOARCH,
 		BuildTags:        []string{options.GOOS, options.GOARCH},
-		GC:               "precise",
-		Scheduler:        "tasks",
 		Linker:           "cc",
 		DefaultStackSize: 1024 * 64, // 64kB
 		GDB:              []string{"gdb"},
@@ -327,14 +341,14 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		spec.CPU = "generic"
 		llvmarch = "aarch64"
 		if options.GOOS == "darwin" {
-			spec.Features = "+fp-armv8,+neon"
+			spec.Features = "+ete,+fp-armv8,+neon,+trbe,+v8a"
 			// Looks like Apple prefers to call this architecture ARM64
 			// instead of AArch64.
 			llvmarch = "arm64"
 		} else if options.GOOS == "windows" {
-			spec.Features = "+fp-armv8,+neon,-fmv"
+			spec.Features = "+ete,+fp-armv8,+neon,+trbe,+v8a,-fmv"
 		} else { // linux
-			spec.Features = "+fp-armv8,+neon,-fmv,-outline-atomics"
+			spec.Features = "+ete,+fp-armv8,+neon,+trbe,+v8a,-fmv,-outline-atomics"
 		}
 	case "mips", "mipsle":
 		spec.CPU = "mips32"
@@ -355,15 +369,7 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			return nil, fmt.Errorf("invalid GOMIPS=%s: must be hardfloat or softfloat", options.GOMIPS)
 		}
 	case "wasm":
-		llvmarch = "wasm32"
-		spec.CPU = "generic"
-		spec.Features = "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext"
-		spec.BuildTags = append(spec.BuildTags, "tinygo.wasm")
-		spec.CFlags = append(spec.CFlags,
-			"-mbulk-memory",
-			"-mnontrapping-fptoint",
-			"-msign-ext",
-		)
+		return nil, fmt.Errorf("GOARCH=wasm but GOOS is unset. Please set GOOS to js, wasip1, or wasip2.")
 	default:
 		return nil, fmt.Errorf("unknown GOARCH=%s", options.GOARCH)
 	}
@@ -373,11 +379,13 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 	llvmvendor := "unknown"
 	switch options.GOOS {
 	case "darwin":
+		spec.GC = "boehm"
 		platformVersion := "10.12.0"
 		if options.GOARCH == "arm64" {
 			platformVersion = "11.0.0" // first macosx platform with arm64 support
 		}
 		llvmvendor = "apple"
+		spec.Scheduler = "threads"
 		spec.Linker = "ld.lld"
 		spec.Libc = "darwin-libSystem"
 		// Use macosx* instead of darwin, otherwise darwin/arm64 will refer to
@@ -390,10 +398,14 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"-platform_version", "macos", platformVersion, platformVersion,
 		)
 		spec.ExtraFiles = append(spec.ExtraFiles,
+			"src/internal/futex/futex_darwin.c",
+			"src/internal/task/task_threads.c",
 			"src/runtime/os_darwin.c",
 			"src/runtime/runtime_unix.c",
 			"src/runtime/signal.c")
 	case "linux":
+		spec.GC = "boehm"
+		spec.Scheduler = "threads"
 		spec.Linker = "ld.lld"
 		spec.RTLib = "compiler-rt"
 		spec.Libc = "musl"
@@ -413,19 +425,31 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			spec.CFlags = append(spec.CFlags, "-mno-outline-atomics")
 		}
 		spec.ExtraFiles = append(spec.ExtraFiles,
+			"src/internal/futex/futex_linux.c",
+			"src/internal/task/task_threads.c",
 			"src/runtime/runtime_unix.c",
 			"src/runtime/signal.c")
 	case "windows":
+		spec.GC = "boehm"
+		spec.Scheduler = "tasks"
 		spec.Linker = "ld.lld"
 		spec.Libc = "mingw-w64"
-		// Note: using a medium code model, low image base and no ASLR
-		// because Go doesn't really need those features. ASLR patches
-		// around issues for unsafe languages like C/C++ that are not
-		// normally present in Go (without explicitly opting in).
-		// For more discussion:
-		// https://groups.google.com/g/Golang-nuts/c/Jd9tlNc6jUE/m/Zo-7zIP_m3MJ?pli=1
 		switch options.GOARCH {
+		case "386":
+			spec.LDFlags = append(spec.LDFlags,
+				"-m", "i386pe",
+				"--major-os-version", "4",
+				"--major-subsystem-version", "4",
+			)
+			// __udivdi3 is not present in ucrt it seems.
+			spec.RTLib = "compiler-rt"
 		case "amd64":
+			// Note: using a medium code model, low image base and no ASLR
+			// because Go doesn't really need those features. ASLR patches
+			// around issues for unsafe languages like C/C++ that are not
+			// normally present in Go (without explicitly opting in).
+			// For more discussion:
+			// https://groups.google.com/g/Golang-nuts/c/Jd9tlNc6jUE/m/Zo-7zIP_m3MJ?pli=1
 			spec.LDFlags = append(spec.LDFlags,
 				"-m", "i386pep",
 				"--image-base", "0x400000",
@@ -441,25 +465,16 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"--no-insert-timestamp",
 			"--no-dynamicbase",
 		)
-	case "wasip1":
-		spec.GC = "" // use default GC
-		spec.Scheduler = "asyncify"
-		spec.Linker = "wasm-ld"
-		spec.RTLib = "compiler-rt"
-		spec.Libc = "wasi-libc"
-		spec.DefaultStackSize = 1024 * 64 // 64kB
-		spec.LDFlags = append(spec.LDFlags,
-			"--stack-first",
-			"--no-demangle",
-		)
-		spec.Emulator = "wasmtime --dir={tmpDir}::/tmp {}"
-		spec.ExtraFiles = append(spec.ExtraFiles,
-			"src/runtime/asm_tinygowasm.S",
-			"src/internal/task/task_asyncify_wasm.S",
-		)
-		llvmos = "wasi"
+	case "wasm", "wasip1", "wasip2":
+		return nil, fmt.Errorf("GOOS=%s but GOARCH is unset. Please set GOARCH to wasm", options.GOOS)
 	default:
 		return nil, fmt.Errorf("unknown GOOS=%s", options.GOOS)
+	}
+
+	if spec.GC == "boehm" {
+		// Add this file only when needed. This fixes a build failure on
+		// Windows.
+		spec.ExtraFiles = append(spec.ExtraFiles, "src/runtime/gc_boehm.c")
 	}
 
 	// Target triples (which actually have four components, but are called

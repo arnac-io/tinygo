@@ -1,3 +1,441 @@
+0.40.1
+---
+* **machine**
+  - nrf: fix flash writes when SoftDevice is enabled
+* **runtime**
+  - runtime: avoid fixed math/rand sequence on RP2040/RP2350 (#5124)
+  - runtime: add calls to initRand() during run() for all schedulers
+  - runtime: call initRand() before initHeap() during initialization
+  - runtime: use rand_hwrng hardwareRand for RP2040/RP2350 (#5135)
+* **libs**
+  - picolibc: use updated location for git repo
+
+0.40.0
+---
+* **general**
+  - all: add full LLVM 20 support
+  - core: feat: enable //go:linkname pragma for globals
+  - core: feature: Add flag to ignore go compatibility matrix (#5078)
+  - chore: update version for 0.40 development cycle
+* **compiler**
+  - emit an error when the actual arch doesn't match GOARCH
+  - mark string parameters as readonly
+  - use Tarjan's SCC algorithm to detect loops for defer
+  - lower "large stack" limit to 16kb
+* **core**
+  - shrink bdwgc library
+  - Fix linker errors for runtime.vgetrandom and crypto/internal/sysrand.fatal
+  - fix: add TryLock to sync.RWMutex
+  - fix: correct linter issues exposed by the fix in #4679
+  - fix: don't hardcode success return state
+  - fix: expand RTT debugger compatibility
+  - internal/task (threads): save stack bounds instead of scanning under a lock
+  - internal/task: create detached threads and fix error handling
+  - interp: better errors when debugging interp
+  - transform (gc): create stack slots in callers of external functions
+  - internal/task: prevent semaphore resource leak for threads scheduler
+* **machine**
+  - cortexm: optimize code size for the HardFault_Handler
+  - fe310: add I2C pins for the HiFive1b
+  - clarify WriteAt semantics of BlockDevice
+  - fix deprecated AsmFull comment (#5005)
+  - make sure DMA buffers do not escape unnecessarily
+  - only enable USB-CDC when needed
+  - use larger SPI MAXCNT on nrf52833 and nrf52840
+  - fix: update m.queuedBytes when clamping output to avoid corrupting sentBytes
+  - fix: use int64 in ReadTemperature to avoid overflow
+  - fix(rp2): disable DBGPAUSE on startup
+  - fix(rp2): possible integer overflow while computing factors for SPI baudrate
+  - fix(rp2): reset spinlocks at startup
+  - fix(rp2): switch spinlock busy loop to wfe
+  - fix(rp2): use side-effect-free spinlocks
+  - nrf: add ADC_VDDH which is an ADC pin for VDDH
+  - nrf: don't block SPI transfer
+  - nrf: don't set PSELN, it's ignored in single ended mode anyway
+  - nrf: fix typo in ADC configuration
+  - nrf: refactor SoftDevice enabled check
+  - nrf: rename pwmPin to adcPin
+  - nrf: support flash operations while the SoftDevice is enabled
+  - rp2040: allow writing to the UART inside interrupts
+  - machine,nrf528: stop the bus only once on I2C bus error and ensures the first error is returned
+* **net**
+  - update submodule to latest commits
+* **runtime**
+  - (avr): fix infinite longjmp loop if stack is aligned to 256 bytes
+  - (gc_blocks.go): clear full size of allocation
+  - (gc_blocks.go): make sweep branchless
+  - (gc_blocks.go): simplify scanning logic
+  - (gc_blocks.go): use a linked stack to scan marked objects
+  - (gc_blocks.go): use best-fit allocation
+  - (gc_boehm.go): fix world already stopped check
+  - (wasm): scan the system stack
+  - fix sleep duration for long sleeps
+  - remove copied code for nrf52840
+  - src/syscall: update src buffer after write
+  - wasm: fix C realloc and optimize it a bit
+* **targets**
+  - add xiao-esp32s3 board target
+  - Add ESP32-S3 support (#5091)
+  - Added Gopher ARCADE board
+  - Create "pico2-ice" target board (#5062)
+* **build/test**
+  - Add testing.T.Context() and testing.B.Context()
+  - create separate go.mod file for testing dependencies for wasm tests that use Chromium headless browser to avoid use of older incompatible version.
+  - go back to normal scheduler instead of tasks scheduler for macos CI
+  - update CI to use Go 1.25.5
+  - update macOS GH actions builds to handle sunset of macOS 13
+  - use task scheduler on macOS builds to avoid test race condition lockups
+  - update all CI builds to use latest stable Go release. Also update some of the actions to their latest releases.
+  - update GH actions builds to use Go 1.25.4
+  - uninstall cmake before install
+  - fix: point the submodule for musl-lib to a mirror in the TinyGo GitHub org
+  - fix: remove macOS 15 from CI build matrix (conflicts with macOS 14 build)
+  - fix: separate host expected bytes from device intended bytes
+  - fix/typo: makeESPFirmwareImage
+  - make: GNUmakefile: shrink TinyGo binaries on Linux
+  - move the directory list into a variable
+  - several improvements to the macOS GH actions build
+  - Fix for #4678: top-level 'make lint' wasn't working
+  - fix: increase the timeout for chromedp to connect to the headless browser used for running the wasm tests.
+  - testdata: some more packages for the test corpus
+
+0.39.0
+---
+* **general**
+  - all: add Go 1.25 support
+  - net: update to latest tinygo net package
+  - docs: clarify build verification step for macOS users
+  - Add flag to skip Renesas SVD builds
+* **build**
+  - Makefile: install missing dlmalloc files
+  - flash: add -o flag support to save built binary (Fixes #4937) (#4942)
+  - fix: update version of clang to 17 to accommodate latest Go 1.25 docker base image
+* **ci**
+  - chore: update all CI builds to test Go 1.25 release
+  - fix: disable test-newest since CircleCI seems unable to download due to rate-limits on Dockerhub
+  - ci: rename some jobs to avoid churn on every Go/LLVM version bump
+  - ci: make the goroutines test less racy
+  - tests: de-flake goroutines test
+* **compiler**
+  - compiler: implement internal/abi.Escape
+* **main**
+  - main: show the compiler error (if any) for `tinygo test -c`
+  - chore: correct GOOS=js name in error messages for WASM
+* **machine**
+  - machine: add international keys
+  - machine: remove some unnecessary "// peripherals:" comments
+  - machine: add I2C pin comments
+  - machine: standardize I2C errors with "i2c:" prefix
+  - machine: make I2C usable in the simulator
+  - fix: add SPI and I2C to teensy 4.1 (#4943)
+  - `rp2`: use the correct channel mask for rp2350 ADC; hold lock during read (#4938)
+  - `rp2`: disable digital input for analog inputs
+* **runtime**
+  - runtime: ensure time.Sleep(d) sleeps at least d
+  - runtime: stub out weak pointer support
+  - runtime: implement dummy AddCleanup
+  - runtime: enable multi-core scheduler for rp2350
+  - `internal/task`: use -stack-size flag when starting a new thread
+  - `internal/task`: add SA_RESTART flag to GC interrupts
+  - `internal/task`: a few small correctness fixes
+  - `internal/gclayout`: make gclayout values constants
+  - darwin: add threading support and use it by default
+* **standard library**
+  - `sync`: implement sync.Swap
+  - `reflect`: implement Method.IsExported
+* **testing**
+  - testing: stub out testing.B.Loop
+* **targets**
+  - `stm32`: add support for the STM32L031G6U6
+  - add metro-rp2350 board definition (#4989)
+  - `rp2040/rp2350`: set the default stack size to 8k for rp2040/rp2350 based boards where this was not already the case
+
+
+0.38.0
+---
+* **general**
+  - `go.*`: upgrade `golang.org/x/tools` to v0.30.0
+  - `all`: add support for LLVM 20
+* **build**
+  - go back to using MinoruSekine/setup-scoop for Windows CI builds
+  - `flake.*`: upgrade to nixpkgs 25.05, LLVM 20
+  - `Makefile`: only detect ccache command when needed
+  - `Makefile`: create random filename inside rule
+  - `Makefile`: don't set GOROOT
+  - `Makefile`: call uname at most once
+  - `Makefile`: only read NodeJS version when it is needed
+* **compiler**
+  - add support for `GODEBUG=gotypesalias=1`
+  - `interp`: fix `copy()` from/to external buffers
+  - add `-nobounds` (similar to `-gcflags=-B`)
+  - `compileopts`: add library version to cached library path
+  - `builder`: build wasi-libc inside TinyGo
+  - `builder`: simplify bdwgc libc dependency
+  - `builder`: don't use precompiled libraries
+  - `compileopts`: enable support for `GOARCH=wasm` in `tinygo test`
+* **fixes**
+  - `rp2350`: Fix DMA to SPI transmits on RP2350 (#4903)
+  - `microbit v2`: use OpenOCD flash method on microbit v2 when using Nordic Semi SoftDevice
+  - `main`: display all of the current GC options for the `-gc` flag
+  - Remove duplicated error handling
+  - `sync`: fix `TestMutexConcurrent` test
+  - fix race condition in `testdata/goroutines.go`
+  - fix build warnings on Windows ARM
+* **machine**
+  - `usb`: add USB mass storage class support
+  - implement usb receive message throttling
+  - declare usb endpoints per-platform
+  - `samd21`: implement watchdog
+  - `samd51`: write to flash memory in 512 byte long chunks
+  - `samd21`: write to flash memory in 64 byte long chunks
+  - don't inline RTT `WriteByte` everywhere
+  - `rp2`: unexport machine-specific errors
+  - `rp2`: discount scheduling delays in I2C timeouts (#4876)
+  - use pointer receiver in simulated PWM peripherals
+  - add simulated PWM/timer peripherals
+  - `rp2`: expose usb endpoint stall handling
+  - `arm`: clear pending interrupts before enabling them
+  - `rp2`: merge common usb code (#4856)
+* **main**
+  - add "cores" and "threads" schedulers to help text
+  - add `StartPos` and `EndPos` to `-json` build output
+  - change `-json` flag to match upstream Go
+* **runtime**
+  - don't lock the print output inside interrupts
+  - don't try to interrupt other cores before they are started
+  - implement `NumCPU` for the multicore scheduler
+  - add support for multicore scheduler
+  - refactor obtaining the system stack
+  - `interrupt`: add `Checkpoint` type
+  - add `exportedFuncPtr`
+  - avoid an allocation in `(*time.Timer).Reset`
+  - stub runtime signal functions for `os/signal` on wasip1
+  - move `timeUnit` to a single place
+  - implement `NumCPU` for `-scheduler=threads`
+  - move `mainExited` boolean
+  - `internal/task`: rename `tinygo_pause` to `tinygo_task_exit`
+  - map every goroutine to a new OS thread
+  - refactor `timerQueue`
+  - make conservative and precise GC MT-safe
+  - `internal/task`: implement atomic primitives for preemptive scheduling
+  - Use diskutil on macOS to extract volume name and path for FAT mounts #4928
+* **standard library**
+  - `net`: update submodule to latest commits
+  - `runtime/debug`: add GC related stubs
+  - `metrics`: flesh out some of the metric types
+  - `reflect`: Chan related stubs
+  - `os`: handle relative and abs paths in `Executable()`
+  - `os`: add `os.Executable()` for Darwin
+  - `sync`: implement `RWMutex` using futexes
+  - `reflect`: Add `SliceOf`, `ArrayOf`, `StructOf`, `MapOf`, `FuncOf`
+* **targets**
+  - `rp2040`: add multicore support
+  - `riscv32`: use `gdb` binary as a fallback
+  - add target for Microbit v2 with SoftDevice S140 support for both peripheral and central
+  - `windows`: use MSVCRT.DLL instead of UCRT on i386
+  - `windows`: add windows/386 support
+  - `arm64`: remove unnecessary `.section` directive
+  - `riscv-qemu`: actually sleep in `time.Sleep()`
+  - `riscv`: define CSR constants and use them where possible
+  - `darwin`: support Boehm GC (and use by default)
+  - `windows`: add support for the Boehm-Demers-Weiser GC
+  - `windows`: fix wrong register for first parameter
+* **wasm**
+  - add Boehm GC support
+  - refactor/modify stub signal handling
+  - don't block `//go:wasmexport` because of running goroutines
+  - use `int64` instead of `float64` for the `timeUnit`
+* **boards**
+  - Add board support for BigTreeTech SKR Pico (#4842)
+
+
+0.37.0
+---
+* **general**
+  - add the Boehm-Demers-Weiser GC on Linux
+* **ci**
+  - add more tests for wasm and baremetal
+* **compiler**
+  - crypto/internal/sysrand is allowed to use unsafe signatures
+* **examples**
+  - add goroutine benchmark to examples
+* **fixes**
+  - ensure use of pointers for SPI interface on atsam21/atsam51 and other machines/boards that were missing implementation (#4798)
+  - replace loop counter with hw timer for USB SetAddressReq on rp2040 (#4796)
+* **internal**
+  - update to go.bytecodealliance.org@v0.6.2 in GNUmakefile and internal/wasm-tools
+  - exclude certain files when copying package in internal/cm
+  - update to go.bytecodealliance.org/cm@v0.2.2 in internal/cm
+  - remove old reflect.go in internal/reflectlite
+* **loader**
+  - use build tags for package iter and iter methods on reflect.Value in loader, iter, reflect
+  - add shim for go1.22 and earlier in loader, iter
+* **machine**
+  - bump rp2040 to 200MHz (#4768)
+  - correct register address for Pin.SetInterrupt for rp2350 (#4782)
+  - don't block the rp2xxx UART interrupt handler
+  - fix RP2040 Pico board on the playground
+  - add flash support for rp2350 (#4803)
+* **os**
+  - add stub Symlink for wasm
+* **refactor**
+  - use *SPI everywhere to make consistent for implementations. Fixes #4663 "in reverse" by making SPI a pointer everywhere, as discussed in the comments.
+* **reflect**
+  - add Value.SetIter{Key,Value} and MapIter.Reset in reflect, internal/reflectlite
+  - embed reflectlite types into reflect types in reflect, internal/reflectlite
+  - add Go 1.24 iter.Seq[2] methods
+  - copy reflect iter tests from upstream Go
+  - panic on Type.CanSeq[2] instead of returning false
+  - remove strconv.go
+  - remove unused go:linkname functions
+* **riscv-qemu**
+  - add VirtIO RNG device
+  - increase stack size
+* **runtime**
+  - only allocate heap memory when needed
+  - remove unused file func.go
+  - use package reflectlite
+* **transform**
+  - cherry-pick from #4774
+
+
+0.36.0
+---
+* **general**
+  - add initial Go 1.24 support
+  - add support for LLVM 19
+  - update license for 2025
+  - make small corrections for README regarding wasm
+  - use GOOS and GOARCH for building wasm simulated boards
+  - only infer target for wasm when GOOS and GOARCH are set correctly, not just based on file extension
+  - add test-corpus-wasip2
+  - use older image for cross-compiling builds
+  - update Linux builds to run on ubuntu-latest since 20.04 is being retired
+  - ensure build output directory is created
+  - add NoSandbox flag to chrome headless that is run during WASM tests, since this is now required for Ubuntu 23+ and we are using Ubuntu 24+ when running Github Actions
+  - update wasmtime used for CI to 29.0.1 to fix issue with install during CI tests
+  - update to use `Get-CimInstance` as `wmic` is being deprecated on WIndows
+  - remove unnecessary executable permissions
+  - `goenv`: update to new v0.36.0 development version
+* **compiler**
+  - `builder`: fix parsing of external ld.lld error messages
+  - `cgo`: mangle identifier names
+  - `interp`: correctly mark functions as modifying memory
+  - add buildmode=wasi-legacy to support existing base of users who expected the older behavior for wasi modules to not return an exit code as if they were reactors
+* **standard library**
+  - `crypto/tls`: add Dialer.DialContext() to fix websocket client
+  - `crypto/tls`: add VersionTLS constants and VersionName(version uint16) method that turns it into a string, copied from big go
+  - `internal/syscall/unix`: use our own version of this package
+  - `machine`: replace hard-coded cpu frequencies on rp2xxx
+  - `machine`: bump rp2350 CPUFrequency to 150 MHz
+  - `machine`: compute rp2 clock dividers from crystal and target frequency
+  - `machine`: remove bytes package dependency in flash code
+  - `machine/usb/descriptor`: avoid bytes package
+  - `net`: update to latest submodule with httptest subpackage and ResolveIPAddress implementation
+  - `os`: add File.Chdir support
+  - `os`: implement stub Chdir for non-OS systems
+  - `os/file`: add file.Chmod
+  - `reflect`: implement Value.Equal
+  - `runtime`: add FIPS helper functions
+  - `runtime`: manually initialize xorshift state
+  - `sync`: move Mutex to internal/task
+  - `syscall`: add wasip1 RandomGet
+  - `testing`: add Chdir
+  - `wasip2`: add stubs to get internal/syscall/unix to work
+* **fixes**
+  - correctly handle calls for GetRNG() when being made from nrf devices with SoftDevice enabled
+  - fix stm32f103 ADC
+  - `wasm`: correctly handle id lookup for finalizeRef call
+  - `wasm`: avoid total failure on wasm finalizer call
+  - `wasm`: convert offset as signed int into unsigned int in syscall/js.stringVal in wasm_exec.js
+* **targets**
+  - rp2350: add pll generalized solution; fix ADC handles; pwm period fix
+  - rp2350: extending support to include the rp2350b
+  - rp2350: cleanup: unexport internal USB and clock package variable, consts and types
+  - nrf: make ADC resolution changeable
+  - turn on GC for TKey1 device, since it does in fact work
+  - match Pico2 stack size to Pico
+* **boards**
+  - add support for Pimoroni Pico Plus2
+  - add target for pico2-w board
+  - add comboat_fw tag for elecrow W5 boards with Combo-AT Wifi firmware
+  - add support for Elecrow Pico rp2350 W5 boards
+  - add support for Elecrow Pico rp2040 W5 boards
+  - add support for NRF51 HW-651
+  - add support for esp32c3-supermini
+  - add support for waveshare-rp2040-tiny
+* **examples**
+  - add naive debouncing for pininterrupt example
+
+
+0.35.0
+---
+* **general**
+  - update cmsis-svd library
+  - use default UART settings in the echo example
+  - `goenv`: also show git hash with custom build of TinyGo
+  - `goenv`: support parsing development versions of Go
+  - `main`: parse extldflags early so we can report the error message
+* **compiler**
+  - `builder`: whitelist temporary directory env var for Clang invocation to fix Windows bug
+  - `builder`: fix cache paths in `-size=full` output
+  - `builder`: work around incorrectly escaped DWARF paths on Windows (Clang bug)
+  - `builder`: fix wasi-libc path names on Windows with `-size=full`
+  - `builder`: write HTML size report
+  - `cgo`: support C identifiers only referred to from within macros
+  - `cgo`: support function-like macros
+  - `cgo`: support errno value as second return parameter
+  - `cgo`: add support for `#cgo noescape` lines
+  - `compiler`: fix bug in interrupt lowering
+  - `compiler`: allow panic directly in `defer`
+  - `compiler`: fix wasmimport -> wasmexport in error message
+  - `compiler`: support `//go:noescape` pragma
+  - `compiler`: report error instead of crashing when instantiating a generic function without body
+  - `interp`: align created globals
+* **standard library**
+  - `machine`: modify i2s interface/implementation to better match specification
+  - `os`: implement `StartProcess`
+  - `reflect`: add `Value.Clear`
+  - `reflect`: add interface support to `NumMethods`
+  - `reflect`: fix `AssignableTo` for named + non-named types
+  - `reflect`: implement `CanConvert`
+  - `reflect`: handle more cases in `Convert`
+  - `reflect`: fix Copy of non-pointer array with size > 64bits
+  - `runtime`: don't call sleepTicks with a negative duration
+  - `runtime`: optimize GC scanning (findHead)
+  - `runtime`: move constants into shared package
+  - `runtime`: add `runtime.fcntl` function for internal/syscall/unix
+  - `runtime`: heapptr only needs to be initialized once
+  - `runtime`: refactor scheduler (this fixes a few bugs with `-scheduler=none`)
+  - `runtime`: rewrite channel implementation to be smaller and more flexible
+  - `runtime`: use `SA_RESTART` when registering a signal for os/signal
+  - `runtime`: implement race-free signals using futexes
+  - `runtime`: run deferred functions in `Goexit`
+  - `runtime`: remove `Cond` which seems to be unused
+  - `runtime`: properly handle unix read on directory
+  - `runtime/trace`: stub all public methods
+  - `sync`: don't use volatile in `Mutex`
+  - `sync`: implement `WaitGroup` using a (pseudo)futex
+  - `sync`: make `Cond` parallelism-safe
+  - `syscall`: use wasi-libc tables for wasm/js target
+* **targets**
+  - `mips`: fix a bug when scanning the stack
+  - `nintendoswitch`: get this target to compile again
+  - `rp2350`: add support for the new RP2350
+  - `rp2040/rp2350` : make I2C implementation shared for rp2040/rp2350
+  - `rp2040/rp2350` : make SPI implementation shared for rp2040/rp2350
+  - `rp2040/rp2350` : make RNG implementation shared for rp2040/rp2350
+  - `wasm`: revise and simplify wasmtime argument handling
+  - `wasm`: support `//go:wasmexport` functions after a call to `time.Sleep`
+  - `wasm`: correctly return from run() in wasm_exec.js
+  - `wasm`: call process.exit() when go.run() returns
+  - `windows`: don't return, exit via exit(0) instead to flush stdout buffer
+* **boards**
+  - add support for the Tillitis TKey
+  - add support for the Raspberry Pi Pico2 (based on the RP2040)
+  - add support for Pimoroni Tiny2350
+
+
 0.34.0
 ---
 * **general**

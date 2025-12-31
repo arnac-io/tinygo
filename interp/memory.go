@@ -42,6 +42,7 @@ type object struct {
 	globalName     string    // name, if not yet created (not guaranteed to be the final name)
 	buffer         value     // buffer with value as given by interp, nil if external
 	size           uint32    // must match buffer.len(), if available
+	align          int       // alignment of the object (may be 0 if unknown)
 	constant       bool      // true if this is a constant global
 	marked         uint8     // 0 means unmarked, 1 means external read, 2 means external write
 }
@@ -593,6 +594,12 @@ func (v pointerValue) toLLVMValue(llvmType llvm.Type, mem *memoryView) (llvm.Val
 		// runtime.alloc.
 		// First allocate a new global for this object.
 		obj := mem.get(v.index())
+		alignment := obj.align
+		if alignment == 0 {
+			// Unknown alignment, perhaps from a direct call to runtime.alloc in
+			// the runtime. Use a conservative default instead.
+			alignment = mem.r.maxAlign
+		}
 		if obj.llvmType.IsNil() && obj.llvmLayoutType.IsNil() {
 			// Create an initializer without knowing the global type.
 			// This is probably the result of a runtime.alloc call.
@@ -603,7 +610,7 @@ func (v pointerValue) toLLVMValue(llvmType llvm.Type, mem *memoryView) (llvm.Val
 			globalType := initializer.Type()
 			llvmValue = llvm.AddGlobal(mem.r.mod, globalType, obj.globalName)
 			llvmValue.SetInitializer(initializer)
-			llvmValue.SetAlignment(mem.r.maxAlign)
+			llvmValue.SetAlignment(alignment)
 			obj.llvmGlobal = llvmValue
 			mem.put(v.index(), obj)
 		} else {
@@ -642,11 +649,7 @@ func (v pointerValue) toLLVMValue(llvmType llvm.Type, mem *memoryView) (llvm.Val
 				return llvm.Value{}, errors.New("interp: allocated value does not match allocated type")
 			}
 			llvmValue.SetInitializer(initializer)
-			if obj.llvmType.IsNil() {
-				// The exact type isn't known (only the layout), so use the
-				// alignment that would normally be expected from runtime.alloc.
-				llvmValue.SetAlignment(mem.r.maxAlign)
-			}
+			llvmValue.SetAlignment(alignment)
 		}
 
 		// It should be included in r.globals because otherwise markExternal
@@ -820,19 +823,6 @@ func (v rawValue) rawLLVMValue(mem *memoryView) (llvm.Value, error) {
 			field, err := pointerValue{v.buf[i]}.toLLVMValue(llvm.Type{}, mem)
 			if err != nil {
 				return llvm.Value{}, err
-			}
-			if !field.IsAGlobalVariable().IsNil() {
-				elementType := field.GlobalValueType()
-				if elementType.TypeKind() == llvm.StructTypeKind {
-					// There are some special pointer types that should be used
-					// as a ptrtoint, so that they can be used in certain
-					// optimizations.
-					name := elementType.StructName()
-					if name == "runtime.funcValueWithSignature" {
-						uintptrType := ctx.IntType(int(mem.r.pointerSize) * 8)
-						field = llvm.ConstPtrToInt(field, uintptrType)
-					}
-				}
 			}
 			structFields = append(structFields, field)
 			i += mem.r.pointerSize
@@ -1043,6 +1033,8 @@ func (v *rawValue) set(llvmValue llvm.Value, r *runner) {
 				v.buf[i] = ptrValue.pointer
 			}
 		case llvm.ICmp:
+			// Note: constant icmp isn't supported anymore in LLVM 19.
+			// Once we drop support for LLVM 18, this can be removed.
 			size := r.targetData.TypeAllocSize(llvmValue.Operand(0).Type())
 			lhs := newRawValue(uint32(size))
 			rhs := newRawValue(uint32(size))
